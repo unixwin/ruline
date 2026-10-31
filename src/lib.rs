@@ -232,9 +232,6 @@
 //!
 //! - `clipboard`: Enable support to use the `SystemClipboard`. Enabling this feature will return a `SystemClipboard` instead of a local clipboard when calling `get_default_clipboard()`.
 //! - `bashisms`: Enable support for special text sequences that recall components from the history. e.g. `!!` and `!$`. For use in shells like `bash` or [`nushell`](https://nushell.sh).
-//! - `sqlite`: Provides the `SqliteBackedHistory` to store richer information in the history. Statically links the required sqlite version.
-//! - `sqlite-dynlib`: Alternative to the feature `sqlite`. Will not statically link. Requires `sqlite >= 3.38` to link dynamically!
-//! - `external_printer`: No-op, kept for compatibility. `ExternalPrinter` is always available.
 //!
 //! ## Are we prompt yet? (Development status)
 //!
@@ -290,6 +287,7 @@ mod painting;
 pub use painting::{Painter, StyledText};
 
 mod engine;
+mod external_printer;
 pub use engine::{MouseClickMode, Reedline};
 
 #[cfg(feature = "system_clipboard")]
@@ -304,8 +302,6 @@ mod result;
 pub use result::{ReedlineError, ReedlineErrorVariants, Result};
 
 mod history;
-#[cfg(feature = "_sqlite")]
-pub use history::SqliteBackedHistory;
 pub use history::{
     CommandLineSearch, FileBackedHistory, History, HistoryItem, HistoryItemExtraInfo,
     HistoryItemId, HistoryNavigationQuery, HistorySessionId, HistoryTimestamp, IgnoreAllExtraInfo,
@@ -350,9 +346,8 @@ pub use validator::{DefaultValidator, ValidationResult, Validator};
 
 mod menu;
 pub use menu::{
-    menu_functions, ColumnarMenu, DescriptionMenu, DescriptionMode, DescriptionPosition, IdeMenu,
-    InputMode, ListMenu, Menu, MenuBuilder, MenuEvent, MenuSettings, MenuTextStyle, OutputMode,
-    ReedlineMenu, TraversalDirection,
+    menu_functions, ColumnarMenu, InputMode, ListMenu, Menu, MenuBuilder, MenuEvent, MenuSettings,
+    MenuTextStyle, OutputMode, ReedlineMenu, TraversalDirection,
 };
 
 mod terminal_extensions;
@@ -363,12 +358,10 @@ pub use terminal_extensions::semantic_prompt::{
 
 mod utils;
 
-mod external_printer;
 pub use utils::{
     get_reedline_default_keybindings, get_reedline_keybinding_modifiers, get_reedline_keycodes,
 };
 
 // Reexport the key types to be independent from an explicit crossterm dependency.
 pub use crossterm::event::{KeyCode, KeyModifiers};
-pub use external_printer::{ExternalOutput, ExternalPrinter};
 pub use nu_ansi_term::Color;

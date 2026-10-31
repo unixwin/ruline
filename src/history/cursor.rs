@@ -150,9 +150,6 @@ mod tests {
     use super::*;
 
     fn create_history() -> (Box<dyn History>, HistoryCursor) {
-        #[cfg(feature = "_sqlite")]
-        let hist = Box::new(SqliteBackedHistory::in_memory().unwrap());
-        #[cfg(not(feature = "_sqlite"))]
         let hist = Box::<FileBackedHistory>::default();
         (
             hist,
@@ -262,7 +259,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "_sqlite"))]
     #[test]
     fn appends_only_unique() -> Result<()> {
         let (mut hist, _) = create_history();
@@ -499,7 +495,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "_sqlite"))]
     #[test]
     fn truncates_file_to_capacity() -> Result<()> {
         use tempfile::tempdir;

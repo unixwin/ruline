@@ -1000,7 +1000,7 @@ mod test {
             mode: ViMode::Insert,
             ..Default::default()
         };
-        let result = vi.parse_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        let result = vi.parse_event(key(KeyCode::Char(';'), KeyModifiers::CONTROL));
 
         assert_eq!(result, ReedlineEvent::None);
     }

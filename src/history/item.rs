@@ -1,5 +1,3 @@
-#[cfg(feature = "_sqlite")]
-use rusqlite::ToSql;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fmt::Display,
@@ -38,15 +36,6 @@ impl Display for HistorySessionId {
     }
 }
 
-#[cfg(feature = "_sqlite")]
-impl ToSql for HistorySessionId {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        Ok(rusqlite::types::ToSqlOutput::Owned(
-            rusqlite::types::Value::Integer(self.0),
-        ))
-    }
-}
-
 impl From<HistorySessionId> for i64 {
     fn from(id: HistorySessionId) -> Self {
         id.0
@@ -82,7 +71,7 @@ impl HistoryItemExtraInfo for IgnoreAllExtraInfo {}
 
 /// A point in time as milliseconds since the Unix epoch (UTC)
 ///
-/// Millisecond precision matches what the sqlite backend stores, so a saved
+/// Millisecond precision matches the file-backed store format, so a saved
 /// item reads back as equal
 #[derive(Clone, Copy, PartialOrd, Ord, Hash, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
