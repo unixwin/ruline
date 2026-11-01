@@ -49,10 +49,13 @@ pub fn default_emacs_keybindings() -> Keybindings {
     // readline sees the byte (signals.c rl_stop handles the caught
     // signal). With ISIG off there is no VSUSP delivery, so we bind the
     // suspend event directly to reproduce GNU's observable behavior.
-    // Undo is C-_ (emacs_keymap.c:66 `rl_undo_command`). crossterm
-    // decodes the 0x1f byte as Control-'7' (`\x1C`..`\x1F` maps to
-    // '4'..'7'), so the byte spelling is bound as well as the
-    // character the kitty protocol reports.
+    // Undo is C-_ (emacs_keymap.c:66 `rl_undo_command`). Terminals
+    // spell the 0x1f byte three ways: crossterm's ANSI parser decodes
+    // it as Control-'7' (`\x1C`..`\x1F` maps to '4'..'7'), the kitty
+    // protocol reports the '_' glyph, and Windows INPUT_RECORDs (the
+    // ConPTY path) surface as Control+Shift+'-' — which the
+    // `ReedlineRawEvent` ingest seam folds onto Control+'_'
+    // (`normalize_control_underscore`). Both surviving spellings bind.
     kb.add_binding(KM::CONTROL, KC::Char('_'), edit_bind(EC::Undo));
     kb.add_binding(KM::CONTROL, KC::Char('7'), edit_bind(EC::Undo));
     // GNU `abort` — `rl_abort` (readline misc.c): cancels the current
@@ -797,6 +800,32 @@ mod test {
                 .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
             None
         );
+    }
+
+    /// Every spelling of the `C-_` byte (0x1F) must parse to `Undo`:
+    /// the kitty glyph, crossterm's VT decoding Ctrl+'7', and the
+    /// ConPTY-measured Windows INPUT_RECORD spelling Control+Shift+'-'
+    /// (folded at the `ReedlineRawEvent` seam). T2 F1.
+    #[test]
+    fn every_c_underscore_spelling_parses_to_undo() {
+        let mut emacs = Emacs::default();
+        let spellings = [
+            (KeyCode::Char('_'), KeyModifiers::CONTROL),
+            (KeyCode::Char('7'), KeyModifiers::CONTROL),
+            (
+                KeyCode::Char('-'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        ];
+        for (code, modifiers) in spellings {
+            let raw = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers)))
+                .expect("key accepted");
+            assert_eq!(
+                emacs.parse_event(raw),
+                ReedlineEvent::Edit(vec![EditCommand::Undo]),
+                "spelling {code:?} + {modifiers:?} must undo"
+            );
+        }
     }
 
     #[test]
