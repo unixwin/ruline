@@ -80,10 +80,26 @@ def is_symbol_name(name: str) -> bool:
 def declared_symbols(text: str) -> set[str]:
     """Return function/variable names from `extern` declarations."""
     symbols: set[str] = set()
-    for declaration in re.findall(r"\bextern\b[^;]*;", strip_comments(text), flags=re.S):
+    # `extern "C" {` is linkage syntax, not a declaration.  Skipping it keeps
+    # the scan from swallowing preprocessor lines and enum bodies up to the
+    # next semicolon.
+    for declaration in re.findall(
+        r'\bextern\s+(?!["])[^;]*;', strip_comments(text), flags=re.S
+    ):
         for name in re.findall(r"\b([A-Za-z_]\w*)\s*(?=\(|\[|;)", declaration):
             if is_symbol_name(name):
                 symbols.add(name)
+
+        # GNU keymaps.h uses one declaration for several arrays:
+        #   extern KEYMAP_ENTRY_ARRAY a, b, c;
+        # The lookahead above only sees the final declarator before `;`.
+        # Drop parameter lists, then take the last identifier of each
+        # comma-separated declarator.
+        without_parameters = re.sub(r"\([^()]*\)", "", declaration)
+        for part in without_parameters.split(","):
+            names = re.findall(r"\b([A-Za-z_]\w*)\b", part)
+            if names and is_symbol_name(names[-1]):
+                symbols.add(names[-1])
     return symbols
 
 
@@ -102,7 +118,9 @@ def vendor_directory(override: str | None) -> Path | None:
 
 def vendor_symbols(directory: Path) -> set[str]:
     names: set[str] = set()
-    for filename in ("readline.h", "history.h"):
+    # keymaps.h owns the exported KEYMAP_ENTRY_ARRAY data symbols and the
+    # make/copy/discard keymap helpers; readline.h only includes it.
+    for filename in ("readline.h", "history.h", "keymaps.h"):
         path = directory / filename
         if path.is_file():
             names |= declared_symbols(path.read_text(encoding="utf-8", errors="replace"))

@@ -135,6 +135,180 @@ static int test_state_and_text(void) {
     return 0;
 }
 
+static int keymap_test_command(int count, int key) {
+    (void)count;
+    (void)key;
+    return 0;
+}
+
+static int test_keymap_and_binding(void) {
+    char path[512];
+    char buffer[64];
+    const char *tmp = getenv("TMPDIR");
+    FILE *file;
+    Keymap map;
+    Keymap copy;
+    rl_command_func_t *function;
+    char **sequences;
+    int length = 0;
+    int type = -1;
+    int found;
+    int i;
+
+    if (tmp == NULL || *tmp == '\0') {
+        tmp = "/tmp";
+    }
+
+    CHECK(KEYMAP_SIZE == 257);
+    CHECK(ANYOTHERKEY == 256);
+    CHECK(ISFUNC == 0);
+    CHECK(ISKMAP == 1);
+    CHECK(ISMACR == 2);
+
+    CHECK(rl_initialize() == 0);
+    CHECK(rl_get_keymap() == emacs_standard_keymap);
+    CHECK(rl_get_keymap_by_name("emacs") == emacs_standard_keymap);
+    CHECK(rl_get_keymap_by_name("emacs-standard") == emacs_standard_keymap);
+    CHECK(rl_get_keymap_by_name("EMACS-META") == emacs_meta_keymap);
+    CHECK(rl_get_keymap_by_name("emacs-ctlx") == emacs_ctlx_keymap);
+    CHECK(rl_get_keymap_by_name("vi") == vi_movement_keymap);
+    CHECK(rl_get_keymap_by_name("vi-insert") == vi_insertion_keymap);
+    CHECK(rl_get_keymap_by_name("no-such-map") == NULL);
+    CHECK(strcmp(rl_get_keymap_name(emacs_standard_keymap), "emacs") == 0);
+    CHECK(strcmp(rl_get_keymap_name(vi_insertion_keymap), "vi-insert") == 0);
+    CHECK(rl_get_keymap_name(NULL) == NULL);
+
+    /* GNU's C-x and C-[ slots indirect through the sub-keymaps. */
+    CHECK(emacs_standard_keymap[24].type == ISKMAP);
+    CHECK((Keymap)emacs_standard_keymap[24].function == emacs_ctlx_keymap);
+    CHECK(emacs_standard_keymap[27].type == ISKMAP);
+    CHECK((Keymap)emacs_standard_keymap[27].function == emacs_meta_keymap);
+
+    function = rl_named_function("beginning-of-line");
+    CHECK(function != NULL);
+    CHECK(rl_function_of_keyseq("\\C-a", emacs_standard_keymap, &type) == function);
+    CHECK(type == ISFUNC);
+    CHECK(rl_function_of_keyseq("\001", emacs_standard_keymap, &type) == function);
+    CHECK(rl_named_function("BEGINNING-OF-LINE") == function);
+    CHECK(rl_named_function("no-such-function") == NULL);
+
+    CHECK(rl_add_defun("ruline-test-command", keymap_test_command, -1) == 0);
+    CHECK(rl_named_function("ruline-test-command") == keymap_test_command);
+
+    CHECK(rl_bind_keyseq("\\C-xy", keymap_test_command) == 0);
+    CHECK(rl_function_of_keyseq("\\C-xy", NULL, &type) == keymap_test_command);
+    CHECK(type == ISFUNC);
+
+    sequences = rl_invoking_keyseqs(keymap_test_command);
+    CHECK(sequences != NULL);
+    found = 0;
+    for (i = 0; sequences[i]; i++) {
+        if (strcmp(sequences[i], "\\C-xy") == 0) {
+            found = 1;
+        }
+        free(sequences[i]);
+    }
+    free(sequences);
+    CHECK(found);
+
+    CHECK(rl_parse_and_bind("\"\\C-x\\C-r\": re-read-init-file") == 0);
+    CHECK(rl_function_of_keyseq("\\C-x\\C-r", NULL, &type) ==
+          rl_named_function("re-read-init-file"));
+    CHECK(type == ISFUNC);
+
+    CHECK(rl_parse_and_bind("\"\\C-xm\": \"hi\"") == 0);
+    function = rl_function_of_keyseq("\\C-xm", NULL, &type);
+    CHECK(type == ISMACR);
+    CHECK(function != NULL);
+    {
+        union {
+            rl_command_func_t *function;
+            char *text;
+        } macro;
+        macro.function = function;
+        CHECK(strcmp(macro.text, "hi") == 0);
+    }
+
+    CHECK(rl_translate_keyseq("\\C-x", buffer, &length) == 0);
+    CHECK(length == 1);
+    CHECK(buffer[0] == 0x18);
+    CHECK(buffer[1] == 0);
+    CHECK(rl_translate_keyseq("\\M-x", buffer, &length) == 0);
+    CHECK(length == 2);
+    CHECK(buffer[0] == 0x1b);
+    CHECK(buffer[1] == 'x');
+    CHECK(rl_translate_keyseq("\\e[1;5C", buffer, &length) == 0);
+    CHECK(length == 6);
+    CHECK(memcmp(buffer, "\033[1;5C", 6) == 0);
+    CHECK(rl_translate_keyseq("^?", buffer, &length) == 0);
+    CHECK(length == 1);
+    CHECK((unsigned char)buffer[0] == 0x7f);
+    CHECK(rl_translate_keyseq("\"\\C-x\\C-r\"", buffer, &length) == 0);
+    CHECK(length == 2);
+    CHECK(buffer[0] == 0x18);
+    CHECK(buffer[1] == 0x12);
+
+    CHECK(strcmp(rl_variable_value("convert-meta"), "on") == 0);
+    CHECK(rl_variable_bind("convert-meta", "off") == 0);
+    CHECK(strcmp(rl_variable_value("convert-meta"), "off") == 0);
+    CHECK(rl_translate_keyseq("\\M-x", buffer, &length) == 0);
+    CHECK(length == 1);
+    CHECK((unsigned char)buffer[0] == 0xf8);
+    CHECK(rl_variable_bind("convert-meta", "on") == 0);
+    CHECK(rl_variable_bind("editing-mode", "vi") == 0);
+    CHECK(rl_get_keymap() == vi_insertion_keymap);
+    CHECK(strcmp(rl_variable_value("editing-mode"), "vi") == 0);
+    CHECK(rl_variable_bind("editing-mode", "emacs") == 0);
+    CHECK(rl_get_keymap() == emacs_standard_keymap);
+    CHECK(rl_variable_bind("keymap", "emacs-meta") == 0);
+    CHECK(rl_get_keymap() == emacs_meta_keymap);
+    CHECK(rl_variable_bind("keymap", "emacs") == 0);
+    CHECK(rl_get_keymap() == emacs_standard_keymap);
+    CHECK(rl_variable_value("no-such-variable") == NULL);
+
+    map = rl_make_bare_keymap();
+    CHECK(map != NULL);
+    CHECK(rl_empty_keymap(map) == 1);
+    CHECK(rl_bind_key_in_map('a', keymap_test_command, map) == 0);
+    CHECK(rl_empty_keymap(map) == 0);
+    CHECK(map['a'].type == ISFUNC);
+    CHECK(map['a'].function == keymap_test_command);
+    copy = rl_copy_keymap(map);
+    CHECK(copy != NULL);
+    CHECK(copy['a'].function == keymap_test_command);
+    CHECK(rl_unbind_function_in_map(keymap_test_command, copy) == 1);
+    CHECK(copy['a'].function == NULL);
+    CHECK(rl_unbind_key_in_map('a', map) == 0);
+    CHECK(map['a'].function == NULL);
+    rl_free_keymap(copy);
+    rl_free_keymap(map);
+
+    snprintf(path, sizeof(path), "%s/ruline-inputrc-%ld", tmp, (long)getpid());
+    unlink(path);
+    file = fopen(path, "w");
+    CHECK(file != NULL);
+    fputs("set editing-mode emacs\n", file);
+    fputs("\"\\C-xt\": transpose-chars\n", file);
+    fputs("$if mode=emacs\n", file);
+    fputs("\"\\C-xd\": dump-functions\n", file);
+    fputs("$else\n", file);
+    fputs("\"\\C-xk\": kill-line\n", file);
+    fputs("$endif\n", file);
+    fclose(file);
+
+    CHECK(rl_read_init_file(path) == 0);
+    CHECK(rl_function_of_keyseq("\\C-xt", NULL, &type) ==
+          rl_named_function("transpose-chars"));
+    CHECK(rl_function_of_keyseq("\\C-xd", NULL, &type) ==
+          rl_named_function("dump-functions"));
+    CHECK(rl_re_read_init_file(0, 0) == 0);
+    unlink(path);
+
+    rl_print_keybinding("ruline-test-command", emacs_standard_keymap, 1);
+    rl_print_keybinding("ruline-test-command", emacs_standard_keymap, 0);
+    return 0;
+}
+
 static int test_history(void) {
     char path[512];
     char timestamp_path[512];
@@ -263,6 +437,9 @@ static int test_history(void) {
 
 int main(void) {
     if (test_state_and_text() != 0) {
+        return 1;
+    }
+    if (test_keymap_and_binding() != 0) {
         return 1;
     }
     if (test_history() != 0) {

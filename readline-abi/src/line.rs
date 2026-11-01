@@ -110,6 +110,7 @@ pub(crate) fn initialize_state_bits() {
 
 #[no_mangle]
 pub unsafe extern "C" fn rl_initialize() -> c_int {
+    crate::keymap::initialize();
     let previous = state::readline_state();
     state::set_readline_state(previous | RL_STATE_INITIALIZING);
 

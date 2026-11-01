@@ -11,6 +11,8 @@
 
 mod history;
 mod interactive;
+mod keymap;
+mod keymap_defaults;
 mod line;
 mod state;
 
