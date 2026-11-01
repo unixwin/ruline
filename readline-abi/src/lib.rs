@@ -22,6 +22,7 @@ mod terminal;
 
 pub use callback::*;
 pub use completion::*;
+pub use editing::*;
 pub use history::*;
 pub use interactive::*;
 pub use keymap::*;

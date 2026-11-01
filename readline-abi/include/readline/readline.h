@@ -227,6 +227,73 @@ extern int rl_clear_visible_line(void);
 extern void rl_free_line_state(void);
 extern int rl_reset_line_state(void);
 
+/* Bindable editing commands.  Each `(int, int)` entry is the GNU command
+ * signature: a numeric argument and the dispatching key.  Movement, insertion,
+ * deletion, case conversion, transposition, mark handling, and the kill/yank
+ * commands operate on the exported line buffer without a terminal loop. */
+extern int rl_insert(int, int);
+extern int rl_quoted_insert(int, int);
+extern int rl_tab_insert(int, int);
+extern int rl_newline(int, int);
+extern int rl_abort(int, int);
+extern int rl_do_lowercase_version(int, int);
+extern int rl_rubout(int, int);
+extern int rl_delete(int, int);
+extern int rl_rubout_or_delete(int, int);
+extern int rl_delete_horizontal_space(int, int);
+extern int rl_delete_or_show_completions(int, int);
+extern int rl_forward(int, int);
+extern int rl_forward_byte(int, int);
+extern int rl_forward_char(int, int);
+extern int rl_backward(int, int);
+extern int rl_backward_byte(int, int);
+extern int rl_backward_char(int, int);
+extern int rl_beg_of_line(int, int);
+extern int rl_end_of_line(int, int);
+extern int rl_forward_word(int, int);
+extern int rl_backward_word(int, int);
+extern int rl_upcase_word(int, int);
+extern int rl_downcase_word(int, int);
+extern int rl_capitalize_word(int, int);
+extern int rl_transpose_words(int, int);
+extern int rl_transpose_chars(int, int);
+extern int rl_set_mark(int, int);
+extern int rl_exchange_point_and_mark(int, int);
+extern int rl_kill_word(int, int);
+extern int rl_backward_kill_word(int, int);
+extern int rl_kill_line(int, int);
+extern int rl_backward_kill_line(int, int);
+extern int rl_kill_full_line(int, int);
+extern int rl_unix_word_rubout(int, int);
+extern int rl_unix_filename_rubout(int, int);
+extern int rl_unix_line_discard(int, int);
+extern int rl_copy_region_to_kill(int, int);
+extern int rl_kill_region(int, int);
+extern int rl_copy_forward_word(int, int);
+extern int rl_copy_backward_word(int, int);
+extern int rl_yank(int, int);
+extern int rl_yank_pop(int, int);
+extern int rl_overwrite_mode(int, int);
+extern int rl_emacs_editing_mode(int, int);
+extern int rl_digit_argument(int, int);
+extern int rl_universal_argument(int, int);
+
+/* Active-region support.  `rl_mark_active_p` reports whether the region is
+ * active; `rl_keep_mark_active` preserves it for the current command. */
+extern void rl_activate_mark(void);
+extern void rl_deactivate_mark(void);
+extern void rl_keep_mark_active(void);
+extern int rl_mark_active_p(void);
+
+/* Numeric-argument and character-class helpers. */
+extern int rl_discard_argument(void);
+extern int rl_alphabetic(int);
+extern void rl_free(void *);
+
+/* Legacy compatibility aliases still exported by GNU's compat.c. */
+extern int ding(void);
+extern int alphabetic(int);
+
 /* Callback mode.  Install prepares the terminal and prints the prompt; each
  * rl_callback_read_char consumes one available key.  A completed line is
  * delivered to the handler (NULL for EOF and interrupts); reinstall replaces

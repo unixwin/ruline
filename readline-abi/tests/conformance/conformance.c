@@ -14,6 +14,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* GNU hides this legacy alias behind `#if 0` in readline.h but compat.c still
+ * exports it.  Declare it locally so the same source builds against both
+ * libraries. */
+extern int alphabetic(int);
+
 static void section(const char *name) {
     printf("== %s ==\n", name);
 }
@@ -163,6 +168,150 @@ int main(void) {
     integer("kill.point", rl_point);
     integer("kill.end", rl_end);
     integer("kill.mark", rl_mark);
+
+    section("editing");
+    rl_replace_line("one two three", 0);
+    rl_point = 0;
+    integer("editing.forward_word.rc", rl_forward_word(1, 0));
+    integer("editing.forward_word.point", rl_point);
+    integer("editing.forward_word2.rc", rl_forward_word(1, 0));
+    integer("editing.forward_word2.point", rl_point);
+    integer("editing.backward_word.rc", rl_backward_word(1, 0));
+    integer("editing.backward_word.point", rl_point);
+    integer("editing.forward.point", (rl_forward(2, 0), rl_point));
+    integer("editing.backward.point", (rl_backward(1, 0), rl_point));
+    integer("editing.beg.rc", rl_beg_of_line(1, 0));
+    integer("editing.beg.point", rl_point);
+    integer("editing.end.rc", rl_end_of_line(1, 0));
+    integer("editing.end.point", rl_point);
+    integer("editing.forward_byte.rc", rl_forward_byte(1, 0));
+    integer("editing.forward_byte.point", rl_point);
+    integer("editing.backward_byte.rc", rl_backward_byte(1, 0));
+    integer("editing.backward_byte.point", rl_point);
+
+    rl_replace_line("ac", 0);
+    rl_point = 1;
+    integer("editing.insert.rc", rl_insert(1, 'b'));
+    value("editing.insert.line", rl_line_buffer);
+    integer("editing.insert.point", rl_point);
+    rl_replace_line("", 0);
+    integer("editing.tab_insert.rc", rl_tab_insert(1, 0));
+    value("editing.tab_insert.line", rl_line_buffer);
+
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    integer("editing.delete.rc", rl_delete(1, 0));
+    value("editing.delete.line", rl_line_buffer);
+    integer("editing.delete.point", rl_point);
+    integer("editing.rubout.rc", rl_rubout(1, 0));
+    value("editing.rubout.line", rl_line_buffer);
+    integer("editing.rubout.point", rl_point);
+    rl_replace_line("ab", 0);
+    rl_point = 2;
+    integer("editing.rubout_or_delete.rc", rl_rubout_or_delete(1, 0));
+    value("editing.rubout_or_delete.line", rl_line_buffer);
+
+    rl_replace_line("a  \t b", 0);
+    rl_point = 4;
+    integer("editing.delete_horizontal_space.rc",
+            rl_delete_horizontal_space(1, 0));
+    value("editing.delete_horizontal_space.line", rl_line_buffer);
+    integer("editing.delete_horizontal_space.point", rl_point);
+
+    rl_replace_line("ab", 0);
+    rl_point = 2;
+    integer("editing.transpose_chars.rc", rl_transpose_chars(1, 0));
+    value("editing.transpose_chars.line", rl_line_buffer);
+    integer("editing.transpose_chars.point", rl_point);
+
+    rl_replace_line("one two", 0);
+    rl_point = 3;
+    integer("editing.transpose_words.rc", rl_transpose_words(1, 0));
+    value("editing.transpose_words.line", rl_line_buffer);
+    integer("editing.transpose_words.point", rl_point);
+
+    rl_replace_line("hello world", 0);
+    rl_point = 0;
+    integer("editing.upcase.rc", rl_upcase_word(1, 0));
+    value("editing.upcase.line", rl_line_buffer);
+    integer("editing.upcase.point", rl_point);
+    integer("editing.downcase.rc", rl_downcase_word(1, 0));
+    value("editing.downcase.line", rl_line_buffer);
+    rl_replace_line("hello wORLD", 0);
+    rl_point = 0;
+    integer("editing.capitalize.rc", rl_capitalize_word(2, 0));
+    value("editing.capitalize.line", rl_line_buffer);
+    integer("editing.capitalize.point", rl_point);
+
+    rl_replace_line("hello", 0);
+    rl_point = 2;
+    integer("editing.set_mark.rc", rl_set_mark(1, 0));
+    integer("editing.set_mark.mark", rl_mark);
+    integer("editing.exchange.rc", rl_exchange_point_and_mark(1, 0));
+    integer("editing.exchange.point", rl_point);
+    integer("editing.exchange.mark", rl_mark);
+    integer("editing.mark_active", rl_mark_active_p());
+    rl_deactivate_mark();
+    integer("editing.mark_inactive", rl_mark_active_p());
+    rl_activate_mark();
+    integer("editing.mark_reactivated", rl_mark_active_p());
+
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    rl_mark = 3;
+    integer("editing.kill_region.rc", rl_kill_region(1, 0));
+    value("editing.kill_region.line", rl_line_buffer);
+    integer("editing.kill_region.point", rl_point);
+    integer("editing.kill_region.mark", rl_mark);
+
+    rl_replace_line("alpha beta", 0);
+    rl_point = 10;
+    integer("editing.unix_word_rubout.rc", rl_unix_word_rubout(1, 0));
+    value("editing.unix_word_rubout.line", rl_line_buffer);
+    integer("editing.unix_word_rubout.point", rl_point);
+    rl_replace_line("src/foo.c", 0);
+    rl_point = 9;
+    integer("editing.unix_filename_rubout.rc", rl_unix_filename_rubout(1, 0));
+    value("editing.unix_filename_rubout.line", rl_line_buffer);
+    integer("editing.unix_filename_rubout.point", rl_point);
+
+    rl_replace_line("abc", 0);
+    rl_point = 2;
+    integer("editing.backward_kill_line.rc", rl_backward_kill_line(1, 0));
+    value("editing.backward_kill_line.line", rl_line_buffer);
+    integer("editing.backward_kill_line.point", rl_point);
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    integer("editing.kill_line.rc", rl_kill_line(1, 0));
+    value("editing.kill_line.line", rl_line_buffer);
+    integer("editing.kill_line.point", rl_point);
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    integer("editing.kill_full_line.rc", rl_kill_full_line(1, 0));
+    value("editing.kill_full_line.line", rl_line_buffer);
+    integer("editing.kill_full_line.point", rl_point);
+    integer("editing.kill_full_line.mark", rl_mark);
+
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    integer("editing.copy_forward_word.rc", rl_copy_forward_word(1, 0));
+    integer("editing.copy_forward_word.point", rl_point);
+    integer("editing.copy_forward_word.mark", rl_mark);
+
+    integer("editing.alphabetic.a", rl_alphabetic('a'));
+    integer("editing.alphabetic.Z", rl_alphabetic('Z'));
+    integer("editing.alphabetic.0", rl_alphabetic('0'));
+    integer("editing.alphabetic.space", rl_alphabetic(' '));
+    integer("editing.alphabetic.legacy", alphabetic('q'));
+    integer("editing.lowercase_version", rl_do_lowercase_version(1, 'A'));
+
+    integer("editing.insert_mode.before", rl_insert_mode);
+    integer("editing.overwrite_mode.rc", rl_overwrite_mode(1, 0));
+    integer("editing.insert_mode.after", rl_insert_mode);
+    integer("editing.overwrite_state",
+            (rl_readline_state & RL_STATE_OVERWRITE) != 0);
+    rl_overwrite_mode(1, 0);
+    integer("editing.insert_mode.restored", rl_insert_mode);
 
     section("keyseq");
     print_keyseq("translate.control", "\\C-x");

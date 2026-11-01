@@ -16,9 +16,12 @@
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_ulong};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::state;
+
+type Command = unsafe extern "C" fn(c_int, c_int) -> c_int;
 
 pub(crate) const RL_STATE_NUMERICARG_BIT: c_ulong = 0x0000_0400;
 pub(crate) const RL_STATE_OVERWRITE_BIT: c_ulong = 0x0000_2000;
@@ -33,6 +36,28 @@ const RL_IM_OVERWRITE: c_int = 0;
 
 /// GNU keeps ten kill-ring slots.
 const MAX_KILLS: usize = 10;
+
+/// Active-region state from `text.c`.  GNU stores the mark-active flag and a
+/// counter that commands bump when the mark must survive the command.
+static MARK_ACTIVE: AtomicBool = AtomicBool::new(false);
+static KEEP_MARK_ACTIVE: AtomicI32 = AtomicI32::new(0);
+
+fn activate_mark() {
+    MARK_ACTIVE.store(true, Ordering::Relaxed);
+    keep_mark_active();
+}
+
+fn keep_mark_active() {
+    KEEP_MARK_ACTIVE.fetch_add(1, Ordering::Relaxed);
+}
+
+fn deactivate_mark() {
+    MARK_ACTIVE.store(false, Ordering::Relaxed);
+}
+
+fn mark_is_active() -> bool {
+    MARK_ACTIVE.load(Ordering::Relaxed)
+}
 
 // --- Line-buffer helpers --------------------------------------------------
 
@@ -83,8 +108,8 @@ fn copy_range(from: c_int, to: c_int) -> Vec<u8> {
     bytes
 }
 
-fn ding() {
-    // SAFETY: rl_ding only writes a bell to stdout.
+fn ring_bell() {
+    // SAFETY: rl_ding only writes a bell to stderr.
     unsafe {
         crate::line::rl_ding();
     }
@@ -177,14 +202,6 @@ fn word_at(bytes: &[u8], position: usize) -> bool {
 
 fn whitespace(byte: u8) -> bool {
     byte == b' ' || byte == b'\t'
-}
-
-fn printable_key(key: c_int) -> Option<u8> {
-    if (0x20..=0xff).contains(&key) && key != 0x7f {
-        Some(key as u8)
-    } else {
-        None
-    }
 }
 
 // --- Kill ring ------------------------------------------------------------
@@ -325,15 +342,13 @@ fn insert_repeated(byte: u8, count: c_int, overwrite: bool) {
     }
 }
 
-pub(crate) fn self_insert(count: c_int, key: c_int) -> c_int {
-    let Some(byte) = printable_key(key) else {
-        ding();
-        return 1;
-    };
+pub(crate) fn insert(count: c_int, key: c_int) -> c_int {
     if count <= 0 {
         return 0;
     }
-    insert_repeated(byte, count, state::insert_mode() == RL_IM_OVERWRITE);
+    // GNU stores the dispatched key in a C `char`, so out-of-range values wrap
+    // to a single byte.  A zero key inserts nothing.
+    insert_repeated(key as u8, count, state::insert_mode() == RL_IM_OVERWRITE);
     0
 }
 
@@ -343,7 +358,7 @@ pub(crate) fn quoted_insert(count: c_int, _key: c_int) -> c_int {
     // live terminal read belongs to the dispatcher (niubash#775).
     let pending = state::pending_input();
     if pending <= 0 || pending > 0xff {
-        ding();
+        ring_bell();
         return 1;
     }
 
@@ -367,6 +382,11 @@ pub(crate) fn tab_insert(count: c_int, _key: c_int) -> c_int {
 }
 
 pub(crate) fn accept_line(_count: c_int, _key: c_int) -> c_int {
+    if mark_is_active() {
+        deactivate_mark();
+        // SAFETY: the redisplay hook only paints the current line.
+        crate::completion::redisplay_with_hook();
+    }
     state::set_done(1);
     state_set(crate::line::RL_STATE_DONE);
     0
@@ -375,16 +395,28 @@ pub(crate) fn accept_line(_count: c_int, _key: c_int) -> c_int {
 pub(crate) fn abort(_count: c_int, _key: c_int) -> c_int {
     // GNU longjmps out of the dispatch loop here.  The standalone library has
     // no loop to unwind, so reset the same visible state and return.
-    ding();
+    ring_bell();
     state::set_pending_input(0);
     state_clear(RL_STATE_INPUTPENDING);
     state::reset_argument();
     state_clear(RL_STATE_NUMERICARG);
+    deactivate_mark();
     // SAFETY: clearing the message only resets prompt/display state.
     unsafe {
         crate::line::rl_clear_message();
     }
     state::set_last_func(None);
+    0
+}
+
+pub(crate) fn discard_argument_body(_count: c_int, _key: c_int) -> c_int {
+    ring_bell();
+    // SAFETY: clearing the message only resets prompt/display state.
+    unsafe {
+        crate::line::rl_clear_message();
+    }
+    state::reset_argument();
+    state_clear(RL_STATE_NUMERICARG);
     0
 }
 
@@ -399,7 +431,7 @@ pub(crate) fn forward_byte(count: c_int, key: c_int) -> c_int {
         if end > state::end() {
             state::set_end(state::end().max(0));
             state::set_point(state::end());
-            ding();
+            ring_bell();
         } else {
             state::set_point(end);
         }
@@ -417,7 +449,7 @@ pub(crate) fn backward_byte(count: c_int, key: c_int) -> c_int {
     if count > 0 {
         if state::point() < count {
             state::set_point(0);
-            ding();
+            ring_bell();
         } else {
             state::set_point(state::point() - count);
         }
@@ -434,13 +466,13 @@ pub(crate) fn forward_char(count: c_int, key: c_int) -> c_int {
     }
     if count > 0 {
         if state::point() == state::end() && emacs_mode() {
-            ding();
+            ring_bell();
             return 0;
         }
         let bytes = line_slice();
         let position = next_position(bytes, state::point().max(0) as usize, count) as c_int;
         if position == state::point() {
-            ding();
+            ring_bell();
         }
         state::set_point(position);
         state::clamp_point();
@@ -454,9 +486,14 @@ pub(crate) fn backward_char(count: c_int, key: c_int) -> c_int {
     }
     if count > 0 {
         let bytes = line_slice();
-        let position = previous_position(bytes, state::point().max(0) as usize, count);
-        if position == 0 && state::point() > 0 && count as usize > state::point() as usize {
-            ding();
+        let mut position = state::point().max(0) as usize;
+        let mut moved = 0;
+        while moved < count && position > 0 {
+            position = previous_position(bytes, position, 1);
+            moved += 1;
+        }
+        if moved < count {
+            ring_bell();
         }
         state::set_point(position as c_int);
         state::clamp_point();
@@ -579,7 +616,7 @@ pub(crate) fn exchange_point_and_mark(_count: c_int, _key: c_int) -> c_int {
         state::set_mark(-1);
     }
     if state::mark() < 0 {
-        ding();
+        ring_bell();
         state::set_mark(0);
         return 1;
     }
@@ -587,6 +624,7 @@ pub(crate) fn exchange_point_and_mark(_count: c_int, _key: c_int) -> c_int {
     let point = state::point();
     state::set_point(state::mark());
     state::set_mark(point);
+    activate_mark();
     0
 }
 
@@ -594,7 +632,7 @@ pub(crate) fn exchange_point_and_mark(_count: c_int, _key: c_int) -> c_int {
 
 fn overwrite_rubout(count: c_int, key: c_int) -> c_int {
     if state::point() == 0 {
-        ding();
+        ring_bell();
         return 1;
     }
 
@@ -621,16 +659,13 @@ fn overwrite_rubout(count: c_int, key: c_int) -> c_int {
     0
 }
 
-pub(crate) fn backward_delete_char(count: c_int, key: c_int) -> c_int {
+fn rubout_char(count: c_int, key: c_int) -> c_int {
     if count < 0 {
         return delete_char(-count, key);
     }
     if state::point() == 0 {
-        ding();
+        ring_bell();
         return 1;
-    }
-    if state::insert_mode() == RL_IM_OVERWRITE {
-        return overwrite_rubout(count, key);
     }
 
     let orig_point = state::point();
@@ -646,12 +681,26 @@ pub(crate) fn backward_delete_char(count: c_int, key: c_int) -> c_int {
     0
 }
 
+pub(crate) fn backward_delete_char(count: c_int, key: c_int) -> c_int {
+    if count < 0 {
+        return delete_char(-count, key);
+    }
+    if state::point() == 0 {
+        ring_bell();
+        return 1;
+    }
+    if state::insert_mode() == RL_IM_OVERWRITE {
+        return overwrite_rubout(count, key);
+    }
+    rubout_char(count, key)
+}
+
 pub(crate) fn delete_char(count: c_int, key: c_int) -> c_int {
     if count < 0 {
-        return backward_delete_char(-count, key);
+        return rubout_char(-count, key);
     }
     if state::point() == state::end() {
-        ding();
+        ring_bell();
         return 1;
     }
 
@@ -670,7 +719,7 @@ pub(crate) fn delete_char(count: c_int, key: c_int) -> c_int {
 
 pub(crate) fn forward_backward_delete_char(count: c_int, key: c_int) -> c_int {
     if state::end() != 0 && state::point() == state::end() {
-        backward_delete_char(count, key)
+        rubout_char(count, key)
     } else {
         delete_char(count, key)
     }
@@ -760,7 +809,7 @@ pub(crate) fn backward_kill_line(direction: c_int, key: c_int) -> c_int {
         return kill_line(1, key);
     }
     if state::point() == 0 {
-        ding();
+        ring_bell();
         return 0;
     }
 
@@ -777,7 +826,7 @@ pub(crate) fn backward_kill_line(direction: c_int, key: c_int) -> c_int {
 
 pub(crate) fn unix_line_discard(_count: c_int, _key: c_int) -> c_int {
     if state::point() == 0 {
-        ding();
+        ring_bell();
         return 0;
     }
 
@@ -791,7 +840,7 @@ pub(crate) fn unix_line_discard(_count: c_int, _key: c_int) -> c_int {
 
 pub(crate) fn unix_word_rubout(count: c_int, _key: c_int) -> c_int {
     if state::point() == 0 {
-        ding();
+        ring_bell();
         return 0;
     }
 
@@ -818,7 +867,7 @@ pub(crate) fn unix_word_rubout(count: c_int, _key: c_int) -> c_int {
 
 pub(crate) fn unix_filename_rubout(count: c_int, _key: c_int) -> c_int {
     if state::point() == 0 {
-        ding();
+        ring_bell();
         return 0;
     }
 
@@ -942,7 +991,7 @@ fn last_command_is(name: &str) -> bool {
 }
 
 fn abort_without_loop() -> c_int {
-    ding();
+    ring_bell();
     state::set_pending_input(0);
     state_clear(RL_STATE_INPUTPENDING);
     state::reset_argument();
@@ -1084,7 +1133,7 @@ pub(crate) fn transpose_chars(count: c_int, _key: c_int) -> c_int {
         return 0;
     }
     if state::point() == 0 || state::end() < 2 {
-        ding();
+        ring_bell();
         return 1;
     }
 
@@ -1128,7 +1177,7 @@ pub(crate) fn transpose_words(count: c_int, key: c_int) -> c_int {
     let w1_end = state::point();
 
     if w1_beg == w2_beg || w2_beg < w1_end {
-        ding();
+        ring_bell();
         state::set_point(orig_point);
         return 1;
     }
@@ -1158,6 +1207,19 @@ fn set_insert_mode(mode: c_int) {
     } else {
         state_clear(RL_STATE_OVERWRITE);
     }
+}
+
+pub(crate) fn do_lowercase_version(_count: c_int, _key: c_int) -> c_int {
+    // GNU's `_rl_dispatch_subseq` treats this sentinel specially: it retries
+    // the same key in lowercase.  The standalone library has no dispatch loop
+    // to retry into, so it reports the sentinel exactly as GNU's body does.
+    99999
+}
+
+pub(crate) fn emacs_editing_mode(_count: c_int, _key: c_int) -> c_int {
+    set_insert_mode(RL_IM_INSERT);
+    crate::keymap::set_emacs_mode();
+    0
 }
 
 pub(crate) fn overwrite_mode(count: c_int, _key: c_int) -> c_int {
@@ -1196,7 +1258,7 @@ pub(crate) fn digit_argument(_count: c_int, key: c_int) -> c_int {
         return 0;
     }
 
-    ding();
+    ring_bell();
     1
 }
 
@@ -1205,6 +1267,166 @@ pub(crate) fn universal_argument(_count: c_int, _key: c_int) -> c_int {
     state::set_explicit_arg(1);
     state_set(RL_STATE_NUMERICARG);
     0
+}
+
+// --- Exported GNU command ABI ---------------------------------------------
+//
+// Every implemented command is exported under its GNU `rl_*` name with the
+// documented `(count, key)` signature.  The default funmap points at these
+// symbols (not at private wrappers), so `rl_named_function`, `rl_add_defun`,
+// key dispatch and the ABI audit all resolve to the same body.
+//
+// Bookkeeping that GNU performs in its dispatch loop (`rl_last_func`,
+// resetting the numeric argument, clamping point) lives here because the
+// standalone library has no loop to do it.
+
+macro_rules! export_command {
+    ($export:ident => $body:path) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $export(count: c_int, key: c_int) -> c_int {
+            let previous = begin_command();
+            let result = $body(count, key);
+            end_command(previous, false);
+            state::set_last_func(Some($export as Command));
+            result
+        }
+    };
+}
+
+macro_rules! export_prefix_command {
+    ($export:ident => $body:path) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $export(count: c_int, key: c_int) -> c_int {
+            let previous = begin_command();
+            let result = $body(count, key);
+            // A prefix command keeps the argument for the command it prefixes
+            // and does not become `rl_last_func` (GNU's dispatcher rule).
+            end_command(previous, true);
+            result
+        }
+    };
+}
+
+/// Abort the current editing command.
+#[no_mangle]
+pub unsafe extern "C" fn rl_abort(count: c_int, key: c_int) -> c_int {
+    let previous = begin_command();
+    let result = abort(count, key);
+    end_command(previous, false);
+    result
+}
+
+export_command!(rl_newline => accept_line);
+export_command!(rl_forward => forward_char);
+export_command!(rl_forward_char => forward_char);
+export_command!(rl_forward_byte => forward_byte);
+export_command!(rl_backward => backward_char);
+export_command!(rl_backward_char => backward_char);
+export_command!(rl_backward_byte => backward_byte);
+export_command!(rl_beg_of_line => beginning_of_line);
+export_command!(rl_end_of_line => end_of_line);
+export_command!(rl_forward_word => forward_word);
+export_command!(rl_backward_word => backward_word);
+export_command!(rl_insert => insert);
+export_command!(rl_quoted_insert => quoted_insert);
+export_command!(rl_tab_insert => tab_insert);
+export_command!(rl_rubout => backward_delete_char);
+export_command!(rl_delete => delete_char);
+export_command!(rl_rubout_or_delete => forward_backward_delete_char);
+export_command!(rl_delete_horizontal_space => delete_horizontal_space);
+export_command!(rl_delete_or_show_completions => delete_char_or_list);
+export_command!(rl_upcase_word => upcase_word);
+export_command!(rl_downcase_word => downcase_word);
+export_command!(rl_capitalize_word => capitalize_word);
+export_command!(rl_transpose_words => transpose_words);
+export_command!(rl_transpose_chars => transpose_chars);
+export_command!(rl_set_mark => set_mark);
+export_command!(rl_exchange_point_and_mark => exchange_point_and_mark);
+export_command!(rl_kill_word => kill_word);
+export_command!(rl_backward_kill_word => backward_kill_word);
+export_command!(rl_kill_line => kill_line);
+export_command!(rl_backward_kill_line => backward_kill_line);
+export_command!(rl_kill_full_line => kill_whole_line);
+export_command!(rl_unix_word_rubout => unix_word_rubout);
+export_command!(rl_unix_filename_rubout => unix_filename_rubout);
+export_command!(rl_unix_line_discard => unix_line_discard);
+export_command!(rl_copy_region_to_kill => copy_region_as_kill);
+export_command!(rl_kill_region => kill_region);
+export_command!(rl_copy_forward_word => copy_forward_word);
+export_command!(rl_copy_backward_word => copy_backward_word);
+export_command!(rl_yank => yank);
+export_command!(rl_yank_pop => yank_pop);
+export_command!(rl_overwrite_mode => overwrite_mode);
+export_command!(rl_emacs_editing_mode => emacs_editing_mode);
+export_prefix_command!(rl_digit_argument => digit_argument);
+export_prefix_command!(rl_universal_argument => universal_argument);
+
+/// GNU's placeholder command that asks the dispatcher to retry the key in
+/// lowercase.  With no dispatcher it returns the same sentinel body value.
+#[no_mangle]
+pub unsafe extern "C" fn rl_do_lowercase_version(count: c_int, key: c_int) -> c_int {
+    do_lowercase_version(count, key)
+}
+
+/// Discard a partially typed numeric argument.
+#[no_mangle]
+pub unsafe extern "C" fn rl_discard_argument() -> c_int {
+    discard_argument_body(0, 0)
+}
+
+/// Mark the region as active and keep it active for the current command.
+#[no_mangle]
+pub unsafe extern "C" fn rl_activate_mark() {
+    activate_mark();
+}
+
+/// Mark the region as inactive.
+#[no_mangle]
+pub unsafe extern "C" fn rl_deactivate_mark() {
+    deactivate_mark();
+}
+
+/// Preserve an active mark across the current command.
+#[no_mangle]
+pub unsafe extern "C" fn rl_keep_mark_active() {
+    keep_mark_active();
+}
+
+/// Whether the region is active.
+#[no_mangle]
+pub unsafe extern "C" fn rl_mark_active_p() -> c_int {
+    c_int::from(mark_is_active())
+}
+
+/// GNU's word-character predicate for the C locale.
+#[no_mangle]
+pub unsafe extern "C" fn rl_alphabetic(character: c_int) -> c_int {
+    if (0..=0xff).contains(&character) && (character as u8).is_ascii_alphanumeric() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Legacy spelling of `rl_alphabetic` (compat.c).
+#[no_mangle]
+pub unsafe extern "C" fn alphabetic(character: c_int) -> c_int {
+    rl_alphabetic(character)
+}
+
+/// Legacy spelling of `rl_ding` (compat.c).
+#[no_mangle]
+pub unsafe extern "C" fn ding() -> c_int {
+    // SAFETY: the bell writer only touches the output stream.
+    unsafe { crate::line::rl_ding() }
+}
+
+/// Free memory allocated by readline (compat.c).
+#[no_mangle]
+pub unsafe extern "C" fn rl_free(memory: *mut libc::c_void) {
+    if !memory.is_null() {
+        libc::free(memory);
+    }
 }
 
 // --- Commands still waiting for the live dispatcher -----------------------
@@ -1220,10 +1442,10 @@ pub(crate) fn universal_argument(_count: c_int, _key: c_int) -> c_int {
 /// reverse/forward-search-history, the non-incremental-*-search-history
 /// commands, insert-comment, revert-line, undo, yank-nth-arg, yank-last-arg,
 /// character-search(-backward), clear-display, clear-screen,
-/// redraw-current-line, skip-csi-sequence, do-lowercase-version,
-/// emacs-editing-mode, execute-named-command, export-completions, the
-/// kbd-macro commands, bracketed-paste-begin, paste-from-clipboard,
-/// tilde-expand, tty-status, arrow-key-prefix, and every vi-* command.
-pub(crate) fn remaining(_count: c_int, _key: c_int) -> c_int {
+/// redraw-current-line, next/previous-screen-line, skip-csi-sequence,
+/// execute-named-command, export-completions, the kbd-macro commands,
+/// bracketed-paste-begin, paste-from-clipboard, tilde-expand, tty-status,
+/// arrow-key-prefix, and every vi-* command.
+pub(crate) unsafe extern "C" fn remaining(_count: c_int, _key: c_int) -> c_int {
     0
 }

@@ -1044,6 +1044,58 @@ static int test_editing_commands(void) {
     CHECK(call_command(__LINE__, "abort", 1, 0) == 0);
     CHECK(rl_pending_input == 0);
 
+    /* The implemented commands are also callable as exported rl_* symbols. */
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    CHECK(rl_forward_word(1, 0) == 0 && rl_point == 3);
+    CHECK(rl_forward(1, 0) == 0 && rl_point == 4);
+    CHECK(rl_backward(1, 0) == 0 && rl_point == 3);
+    CHECK(rl_beg_of_line(1, 0) == 0 && rl_point == 0);
+    CHECK(rl_end_of_line(1, 0) == 0 && rl_point == 7);
+    CHECK(rl_backward_byte(1, 0) == 0 && rl_point == 6);
+    CHECK(rl_forward_byte(1, 0) == 0 && rl_point == 7);
+
+    rl_replace_line("ac", 0);
+    rl_point = 1;
+    CHECK(rl_insert(1, 'b') == 0);
+    CHECK(strcmp(rl_line_buffer, "abc") == 0 && rl_point == 2);
+    CHECK(rl_tab_insert(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "ab\tc") == 0);
+    CHECK(rl_delete(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "ab\t") == 0 && rl_point == 3);
+    CHECK(rl_rubout(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "ab") == 0 && rl_point == 2);
+    CHECK(rl_rubout_or_delete(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "a") == 0 && rl_point == 1);
+
+    rl_deactivate_mark();
+    CHECK(rl_mark_active_p() == 0);
+    rl_activate_mark();
+    CHECK(rl_mark_active_p() == 1);
+    rl_keep_mark_active();
+    CHECK(rl_mark_active_p() == 1);
+    rl_deactivate_mark();
+    CHECK(rl_alphabetic('a') == 1);
+    CHECK(rl_alphabetic(' ') == 0);
+    CHECK(alphabetic('7') == 1);
+    CHECK(rl_do_lowercase_version(1, 'A') == 99999);
+
+    rl_explicit_arg = 1;
+    rl_numeric_arg = 9;
+    CHECK(rl_discard_argument() == 0);
+    CHECK(rl_explicit_arg == 0 && rl_numeric_arg == 1);
+
+    {
+        char *copy = rl_copy_text(0, 1);
+        CHECK(copy != NULL);
+        rl_free(copy);
+    }
+
+    CHECK(rl_variable_bind("editing-mode", "vi") == 0);
+    CHECK(rl_emacs_editing_mode(1, 0) == 0);
+    CHECK(rl_insert_mode == 1);
+    CHECK(strcmp(rl_get_keymap_name(rl_get_keymap()), "emacs") == 0);
+
     return 0;
 }
 

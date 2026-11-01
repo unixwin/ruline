@@ -17,18 +17,18 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 | Surface | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: |
-| Functions | 119 | 329 | 36.2% | 210 |
+| Functions | 174 | 329 | 52.9% | 155 |
 | Globals | 82 | 110 | 74.5% | 28 |
-| **All** | **201** | **439** | **45.8%** | **238** |
+| **All** | **256** | **439** | **58.3%** | **183** |
 
 ## By area
 
 | Area | Functions | Globals | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| state | 3/6 | 15/25 | 18 | 31 | 58.1% | 13 |
-| text | 7/140 | 0/0 | 7 | 140 | 5.0% | 133 |
+| state | 4/6 | 15/25 | 19 | 31 | 61.3% | 12 |
+| text | 60/140 | 0/0 | 60 | 140 | 42.9% | 80 |
 | keymap | 51/53 | 8/12 | 59 | 65 | 90.8% | 6 |
-| completion | 11/18 | 33/36 | 44 | 54 | 81.5% | 10 |
+| completion | 12/18 | 33/36 | 45 | 54 | 83.3% | 9 |
 | hooks | 0/0 | 8/11 | 8 | 11 | 72.7% | 3 |
 | history | 20/56 | 18/19 | 38 | 75 | 50.7% | 37 |
 | callbacks | 4/4 | 0/0 | 4 | 4 | 100.0% | 0 |
@@ -38,68 +38,53 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 ## Top missing groups
 
-1. **text** — 133 missing (7/140 implemented)
+1. **text** — 80 missing (60/140 implemented)
 2. **history** — 37 missing (38/75 implemented)
 3. **display** — 16 missing (10/26 implemented)
 4. **terminal** — 14 missing (8/22 implemented)
-5. **state** — 13 missing (18/31 implemented)
+5. **state** — 12 missing (19/31 implemented)
 
 ## Missing symbols
 
-### state (13)
+### state (12)
 
-`rl_discard_argument` `rl_dispatching` `rl_editing_mode` `rl_eof_found`
-`rl_executing_macro` `rl_gnu_readline_p` `rl_instream` `rl_outstream`
-`rl_prefer_env_winsize` `rl_restore_state` `rl_save_state` `rl_terminal_name`
-`rl_undo_list`
+`rl_dispatching` `rl_editing_mode` `rl_eof_found` `rl_executing_macro`
+`rl_gnu_readline_p` `rl_instream` `rl_outstream` `rl_prefer_env_winsize`
+`rl_restore_state` `rl_save_state` `rl_terminal_name` `rl_undo_list`
 
-### text (133)
+### text (80)
 
-`alphabetic` `ding` `free_undo_list` `maybe_replace_line`
-`maybe_save_line` `maybe_unsave_line` `rl_abort` `rl_activate_mark`
-`rl_add_undo` `rl_alphabetic` `rl_backward` `rl_backward_byte`
-`rl_backward_char` `rl_backward_char_search` `rl_backward_kill_line` `rl_backward_kill_word`
-`rl_backward_word` `rl_beg_of_line` `rl_begin_undo_group` `rl_bracketed_paste_begin`
-`rl_call_last_kbd_macro` `rl_capitalize_word` `rl_char_search` `rl_copy_backward_word`
-`rl_copy_forward_word` `rl_copy_region_to_kill` `rl_deactivate_mark` `rl_delete`
-`rl_delete_horizontal_space` `rl_digit_argument` `rl_do_lowercase_version` `rl_do_undo`
-`rl_downcase_word` `rl_emacs_editing_mode` `rl_end_kbd_macro` `rl_end_of_line`
-`rl_end_undo_group` `rl_exchange_point_and_mark` `rl_execute_named_command` `rl_forward`
-`rl_forward_byte` `rl_forward_char` `rl_forward_word` `rl_free`
-`rl_free_undo_list` `rl_insert` `rl_insert_close` `rl_insert_comment`
-`rl_keep_mark_active` `rl_kill_full_line` `rl_kill_line` `rl_kill_region`
-`rl_kill_word` `rl_mark_active_p` `rl_maybe_replace_line` `rl_maybe_save_line`
-`rl_maybe_unsave_line` `rl_modifying` `rl_newline` `rl_overwrite_mode`
-`rl_paste_from_clipboard` `rl_print_last_kbd_macro` `rl_push_macro_input` `rl_quoted_insert`
-`rl_restart_output` `rl_revert_line` `rl_rubout` `rl_rubout_or_delete`
-`rl_set_mark` `rl_start_kbd_macro` `rl_stop_output` `rl_tab_insert`
-`rl_tilde_expand` `rl_transpose_chars` `rl_transpose_words` `rl_tty_status`
-`rl_undo_command` `rl_universal_argument` `rl_unix_filename_rubout` `rl_unix_line_discard`
-`rl_unix_word_rubout` `rl_upcase_word` `rl_vi_append_eol` `rl_vi_append_mode`
-`rl_vi_arg_digit` `rl_vi_bWord` `rl_vi_back_to_indent` `rl_vi_bracktype`
-`rl_vi_bword` `rl_vi_change_case` `rl_vi_change_char` `rl_vi_change_to`
-`rl_vi_char_search` `rl_vi_check` `rl_vi_column` `rl_vi_delete`
-`rl_vi_delete_to` `rl_vi_domove` `rl_vi_eWord` `rl_vi_editing_mode`
-`rl_vi_end_word` `rl_vi_eof_maybe` `rl_vi_eword` `rl_vi_fWord`
-`rl_vi_first_print` `rl_vi_fword` `rl_vi_goto_mark` `rl_vi_insert_beg`
-`rl_vi_insert_mode` `rl_vi_insertion_mode` `rl_vi_match` `rl_vi_movement_mode`
-`rl_vi_next_word` `rl_vi_overstrike` `rl_vi_overstrike_delete` `rl_vi_prev_word`
-`rl_vi_put` `rl_vi_redo` `rl_vi_replace` `rl_vi_rubout`
-`rl_vi_set_mark` `rl_vi_start_inserting` `rl_vi_subst` `rl_vi_tilde_expand`
-`rl_vi_undo` `rl_vi_unix_word_rubout` `rl_vi_yank_arg` `rl_vi_yank_pop`
-`rl_vi_yank_to` `rl_yank` `rl_yank_last_arg` `rl_yank_nth_arg`
-`rl_yank_pop`
+`free_undo_list` `maybe_replace_line` `maybe_save_line` `maybe_unsave_line`
+`rl_add_undo` `rl_backward_char_search` `rl_begin_undo_group` `rl_bracketed_paste_begin`
+`rl_call_last_kbd_macro` `rl_char_search` `rl_do_undo` `rl_end_kbd_macro`
+`rl_end_undo_group` `rl_execute_named_command` `rl_free_undo_list` `rl_insert_close`
+`rl_insert_comment` `rl_maybe_replace_line` `rl_maybe_save_line` `rl_maybe_unsave_line`
+`rl_modifying` `rl_paste_from_clipboard` `rl_print_last_kbd_macro` `rl_push_macro_input`
+`rl_restart_output` `rl_revert_line` `rl_start_kbd_macro` `rl_stop_output`
+`rl_tilde_expand` `rl_tty_status` `rl_undo_command` `rl_vi_append_eol`
+`rl_vi_append_mode` `rl_vi_arg_digit` `rl_vi_bWord` `rl_vi_back_to_indent`
+`rl_vi_bracktype` `rl_vi_bword` `rl_vi_change_case` `rl_vi_change_char`
+`rl_vi_change_to` `rl_vi_char_search` `rl_vi_check` `rl_vi_column`
+`rl_vi_delete` `rl_vi_delete_to` `rl_vi_domove` `rl_vi_eWord`
+`rl_vi_editing_mode` `rl_vi_end_word` `rl_vi_eof_maybe` `rl_vi_eword`
+`rl_vi_fWord` `rl_vi_first_print` `rl_vi_fword` `rl_vi_goto_mark`
+`rl_vi_insert_beg` `rl_vi_insert_mode` `rl_vi_insertion_mode` `rl_vi_match`
+`rl_vi_movement_mode` `rl_vi_next_word` `rl_vi_overstrike` `rl_vi_overstrike_delete`
+`rl_vi_prev_word` `rl_vi_put` `rl_vi_redo` `rl_vi_replace`
+`rl_vi_rubout` `rl_vi_set_mark` `rl_vi_start_inserting` `rl_vi_subst`
+`rl_vi_tilde_expand` `rl_vi_undo` `rl_vi_unix_word_rubout` `rl_vi_yank_arg`
+`rl_vi_yank_pop` `rl_vi_yank_to` `rl_yank_last_arg` `rl_yank_nth_arg`
 
 ### keymap (6)
 
 `funmap` `rl_binding_keymap` `rl_executing_key` `rl_executing_keymap`
 `rl_set_key` `rl_trim_arg_from_keyseq`
 
-### completion (10)
+### completion (9)
 
-`completion_matches` `filename_completion_function` `rl_completion_rewrite_hook` `rl_delete_or_show_completions`
-`rl_directory_completion_hook` `rl_export_completions` `rl_ignore_some_completions_function` `rl_old_menu_complete`
-`rl_vi_complete` `username_completion_function`
+`completion_matches` `filename_completion_function` `rl_completion_rewrite_hook` `rl_directory_completion_hook`
+`rl_export_completions` `rl_ignore_some_completions_function` `rl_old_menu_complete` `rl_vi_complete`
+`username_completion_function`
 
 ### hooks (3)
 
@@ -143,6 +128,6 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 ## Audit notes
 
-- Library: `target/debug/libreadline.so` (202 ABI exports).
-- Headers: 202 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
+- Library: `target/debug/libreadline.so` (257 ABI exports).
+- Headers: 257 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
 - The ten legacy compatibility aliases wrapped in `#if 0` in the GNU header are included in the denominator: GNU's `compat.c` still exports them in `libreadline.so.8`.

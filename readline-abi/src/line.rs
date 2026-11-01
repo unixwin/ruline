@@ -71,6 +71,13 @@ fn write_stdout(bytes: &[u8]) {
     let _ = lock.flush();
 }
 
+fn write_stderr(bytes: &[u8]) {
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    let _ = lock.write_all(bytes);
+    let _ = lock.flush();
+}
+
 pub(crate) fn initialize_line_state() {
     state::reset_line_state();
     state::reset_argument();
@@ -278,7 +285,12 @@ pub unsafe extern "C" fn rl_extend_line_buffer(len: c_int) {
 
 #[no_mangle]
 pub unsafe extern "C" fn rl_ding() -> c_int {
-    write_stdout(b"\x07");
+    // GNU writes the audible bell to stderr and reports -1 when echoing is
+    // disabled (terminal.c:rl_ding).
+    if state::echoing() == 0 {
+        return -1;
+    }
+    write_stderr(b"\x07");
     0
 }
 
