@@ -1360,7 +1360,7 @@ fn gen_completion_matches(
     quote_char: c_char,
 ) -> *mut *mut c_char {
     set_completion_found_quote(found_quote);
-    set_completion_quote_character(quote_char as c_int);
+    set_completion_quote_character(c_int::from(c_byte(quote_char)));
 
     let text_c = bytes_to_c(text);
     if text_c.is_null() {

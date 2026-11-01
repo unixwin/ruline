@@ -90,7 +90,11 @@ fn copy_to_c_string(bytes: &[u8]) -> *mut c_char {
         return ptr::null_mut();
     }
     unsafe {
-        ptr::copy_nonoverlapping(terminated.as_ptr(), pointer, terminated.len());
+        ptr::copy_nonoverlapping(
+            terminated.as_ptr(),
+            state::char_ptr_as_u8(pointer),
+            terminated.len(),
+        );
     }
     pointer
 }
@@ -178,7 +182,7 @@ pub(crate) fn next_macro_key() -> c_int {
     let index = EXECUTING_INDEX.load(Ordering::Relaxed).max(0) as usize;
     // SAFETY: the executing macro is a NUL-terminated string and `index`
     // never advances past the terminator.
-    let byte = unsafe { *pointer.add(index) };
+    let byte = unsafe { *state::char_ptr_as_u8(pointer).add(index) };
     if byte == 0 {
         pop_executing_macro();
         return next_macro_key();
