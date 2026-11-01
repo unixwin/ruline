@@ -101,6 +101,24 @@ jobs:
       - name: Check SONAME
         run: readelf -d target/debug/libreadline.so | grep -F 'libreadline.so.8'
 
+  # Differential oracle: compile the same C conformance probe against the
+  # system GNU readline 8.3 and against our libreadline, then diff the output.
+  # Any difference is a compatibility bug; the line prefix names the area.
+  readline-conformance:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install GNU readline headers
+        run: sudo apt-get update && sudo apt-get install -y libreadline-dev
+
+      - name: C ABI differential conformance
+        run: readline-abi/tests/conformance/run.sh
+
   # Guards the `rust-version` claim in Cargo.toml, compiling the library as a
   # consumer on the MSRV would. Kept as a CI job instead of a rust-toolchain.toml
   # on purpose; everything else floats on stable.
