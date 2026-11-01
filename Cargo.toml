@@ -12,7 +12,9 @@ repository = "https://github.com/unixwin/ruline"
 homepage = "https://github.com/unixwin/ruline"
 readme = "README.md"
 rust-version = "1.95.0"
-version = "0.52.1"
+# ruline starts its own version line here. The 0.52.1 base is recorded
+# in UPSTREAM.md/ACKNOWLEDGMENTS.md as provenance, not as our version.
+version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
