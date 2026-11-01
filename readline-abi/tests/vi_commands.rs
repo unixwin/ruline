@@ -84,7 +84,7 @@ fn modes_and_check_follow_gnu_keymaps() {
         readline::rl_initialize();
         assert_eq!(readline::rl_vi_editing_mode(1, 0), 0);
         assert_eq!(keymap_name().as_deref(), Some("vi-insert"));
-        assert_eq!(readline::rl_insert_mode, 1);
+        assert_eq!(std::ptr::addr_of!(readline::rl_insert_mode).read(), 1);
 
         set_line("abc");
         set_point(3);
@@ -118,7 +118,9 @@ fn word_motions_match_the_oracle() {
         assert_eq!(readline::rl_vi_end_word(1, b'e' as c_int), 0);
         assert_eq!(point(), 6);
         assert_eq!(readline::rl_vi_prev_word(1, b'b' as c_int), 0);
-        assert_eq!(point(), 0);
+        // From the end of "two" (index 6), `b` lands at the start of
+        // that same word (4), not at the start of the line.
+        assert_eq!(point(), 4);
     }
 
     set_line("a.b c");
@@ -381,7 +383,7 @@ fn overstrike_and_replace_build_the_replace_mode_state() {
     // SAFETY: exported vi commands take (count, key).
     unsafe {
         assert_eq!(readline::rl_vi_replace(1, b'R' as c_int), 0);
-        assert_eq!(readline::rl_insert_mode, 1);
+        assert_eq!(std::ptr::addr_of!(readline::rl_insert_mode).read(), 1);
         assert_eq!(keymap_name(), None);
         assert_eq!(readline::rl_insert(1, b'X' as c_int), 0);
         assert_eq!(readline::rl_insert(1, b'Y' as c_int), 0);

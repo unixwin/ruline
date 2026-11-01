@@ -23,13 +23,9 @@ mod macros;
 mod misc_text;
 mod state;
 mod terminal;
-<<<<<<< HEAD
 mod undo;
-mod yankarg;
-||||||| parent of 6a405d4 (readline-abi: implement the vi-mode command ABI)
-=======
 mod vi;
->>>>>>> 6a405d4 (readline-abi: implement the vi-mode command ABI)
+mod yankarg;
 
 pub use callback::*;
 pub use chars::*;
@@ -44,10 +40,6 @@ pub use macros::*;
 pub use misc_text::*;
 pub use state::*;
 pub use terminal::*;
-<<<<<<< HEAD
 pub use undo::*;
-pub use yankarg::*;
-||||||| parent of 6a405d4 (readline-abi: implement the vi-mode command ABI)
-=======
 pub use vi::*;
->>>>>>> 6a405d4 (readline-abi: implement the vi-mode command ABI)
+pub use yankarg::*;

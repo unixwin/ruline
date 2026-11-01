@@ -506,30 +506,23 @@ fn fWord_body(count: c_int, _key: c_int) -> c_int {
 }
 
 fn bWord_body(count: c_int, _key: c_int) -> c_int {
-    let mut remaining = count;
-    while remaining > 0 && state::point() > 0 {
+    // Vi `B`: same walk, but a "word" is the whole non-whitespace run.
+    let mut remaining = count.max(0);
+    let mut point = state::point();
+    while remaining > 0 && point > 0 {
         remaining -= 1;
-        if !whitespace_at(state::point()) && whitespace_at(state::point() - 1) {
-            state::set_point(state::point() - 1);
+        point -= 1;
+        while point > 0 && whitespace_at(point) {
+            point -= 1;
         }
-        while state::point() > 0 && whitespace_at(state::point()) {
-            backup_point();
+        while point > 0 && !whitespace_at(point - 1) {
+            point -= 1;
         }
-        if state::point() > 0 {
-            loop {
-                backup_point();
-                if !(state::point() > 0 && !whitespace_at(state::point())) {
-                    break;
-                }
-            }
-            if state::point() > 0 {
-                state::set_point(state::point() + 1);
-            }
-            if state::point() < 0 {
-                state::set_point(0);
-            }
+        if point == 0 {
+            break;
         }
     }
+    state::set_point(point);
     0
 }
 
@@ -587,58 +580,31 @@ fn fword_body(count: c_int, _key: c_int) -> c_int {
 }
 
 fn bword_body(count: c_int, _key: c_int) -> c_int {
-    let mut remaining = count;
-    while remaining > 0 && state::point() > 0 {
+    // GNU vi_mode.c `b`/`B`: step back at least one character, skip the
+    // whitespace run, then walk to the start of the word. Normal `b`
+    // treats a punctuation run as its own word; `B` uses whitespace only.
+    let mut remaining = count.max(0);
+    let mut point = state::point();
+    while remaining > 0 && point > 0 {
         remaining -= 1;
-
-        if !whitespace_at(state::point()) && whitespace_at(state::point() - 1) {
-            state::set_point(state::point() - 1);
-            if state::point() == 0 {
-                break;
-            }
+        point -= 1;
+        while point > 0 && whitespace_at(point) {
+            point -= 1;
         }
-
-        let cur_is_ident = ident_at(state::point());
-        let opoint = backup_point();
-        let prev_is_ident = ident_at(state::point());
-        // GNU keeps the backed-up point only when the two characters are on
-        // opposite sides of the identifier boundary.
-        if (cur_is_ident && prev_is_ident) || (!cur_is_ident && !prev_is_ident) {
-            state::set_point(opoint);
+        if point == 0 {
+            break;
         }
-
-        while state::point() > 0 && whitespace_at(state::point()) {
-            backup_point();
-        }
-
-        if state::point() > 0 {
-            let mut opoint;
-            if ident_at(state::point()) {
-                loop {
-                    opoint = backup_point();
-                    if !(state::point() > 0 && ident_at(state::point())) {
-                        break;
-                    }
-                }
-            } else {
-                loop {
-                    opoint = backup_point();
-                    if !(state::point() > 0
-                        && !ident_at(state::point())
-                        && !whitespace_at(state::point()))
-                    {
-                        break;
-                    }
-                }
+        if ident_at(point) {
+            while point > 0 && !whitespace_at(point - 1) && ident_at(point - 1) {
+                point -= 1;
             }
-            if state::point() > 0 {
-                state::set_point(opoint);
-            }
-            if state::point() < 0 {
-                state::set_point(0);
+        } else {
+            while point > 0 && !whitespace_at(point - 1) && !ident_at(point - 1) {
+                point -= 1;
             }
         }
     }
+    state::set_point(point);
     0
 }
 
@@ -1105,8 +1071,8 @@ fn domove_motion(context: MotionContext) -> c_int {
     if !buffer.is_null() {
         // SAFETY: `ensure_line_capacity` reserved room for the blank and NUL.
         unsafe {
-            *(buffer as *mut u8).add(saved_end as usize) = b' ';
-            *(buffer as *mut u8).add(saved_end as usize + 1) = 0;
+            *buffer.add(saved_end as usize) = b' ';
+            *buffer.add(saved_end as usize + 1) = 0;
         }
     }
     state::set_end(saved_end + 1);
@@ -1118,7 +1084,7 @@ fn domove_motion(context: MotionContext) -> c_int {
     let buffer = state::line_buffer();
     if !buffer.is_null() {
         // SAFETY: the buffer still owns `saved_end` bytes after restoration.
-        unsafe { *(buffer as *mut u8).add(saved_end as usize) = 0 };
+        unsafe { *buffer.add(saved_end as usize) = 0 };
     }
     state::clamp_point();
 
@@ -1143,11 +1109,10 @@ fn domove_motion(context: MotionContext) -> c_int {
         while state::point() > state::mark() && whitespace_at(state::point()) {
             state::set_point(state::point() - 1);
         }
-        if state::point() == state::mark() {
-            advance_point();
-        } else if state::point() >= 0
-            && state::point() < state::end() - 1
-            && !whitespace_at(state::point())
+        if state::point() == state::mark()
+            || (state::point() >= 0
+                && state::point() < state::end() - 1
+                && !whitespace_at(state::point()))
         {
             advance_point();
         }
@@ -1497,7 +1462,7 @@ fn replace_body(_count: c_int, key: c_int) -> c_int {
 // --- Put, yank, and kill-ring popping ------------------------------------
 
 fn put_body(count: c_int, key: c_int) -> c_int {
-    if !uppercase_p(key) && state::point() + 1 <= state::end() {
+    if !uppercase_p(key) && state::point() < state::end() {
         state::set_point(advance_byte_position(state::point()));
         state::clamp_point();
     }

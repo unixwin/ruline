@@ -551,7 +551,10 @@ pub unsafe extern "C" fn add_history_time(string: *const c_char) {
 pub unsafe extern "C" fn clear_history() {
     let mut state = history();
     state.entries.clear();
-    state.rebuild_list_if_allocated();
+    // GNU clear_history frees the array and leaves `the_history == NULL`;
+    // removing the last entry one by one, by contrast, keeps the allocated
+    // NULL-terminated vector.
+    state.list.clear();
     set_history_length_from_store(&state);
     set_history_offset(0);
     ptr::addr_of_mut!(history_base).write(1);
@@ -2414,8 +2417,8 @@ mod tests {
             libc::free(range as *mut c_void);
             assert_eq!(history_length_value(), 1);
             clear_history();
-            assert!(!history_list().is_null());
-            assert!((*history_list()).is_null());
+            // GNU clear_history frees the array and leaves the_history NULL.
+            assert!(history_list().is_null());
         }
     }
 

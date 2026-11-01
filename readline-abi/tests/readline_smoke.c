@@ -1450,10 +1450,11 @@ static int test_history_abi(void) {
         tmp = "/tmp";
     }
 
-    /* Before the legacy test has allocated anything, GNU returns NULL. */
+    /* Earlier probes may have added history; clear it before asserting the
+     * empty-list contract. */
+    clear_history();
     CHECK(history_list() == NULL);
 
-    clear_history();
     add_history("one");
     add_history("two");
     add_history("three");
@@ -2035,7 +2036,7 @@ static int test_vi_commands(void) {
     CHECK(rl_vi_end_word(1, 'e') == 0);
     CHECK(rl_point == 6);
     CHECK(rl_vi_prev_word(1, 'b') == 0);
-    CHECK(rl_point == 0);
+    CHECK(rl_point == 4);
     rl_replace_line("a.b c", 0);
     rl_point = 0;
     CHECK(rl_vi_fWord(1, 'W') == 0);
@@ -2220,6 +2221,9 @@ static int test_vi_commands(void) {
     CHECK(rl_mark == rl_end);
     rl_explicit_arg = 0;
     rl_numeric_arg = 1;
+    /* fetch-history moved the history position to the old entry; reset to
+     * the newest before testing the last-argument yank. */
+    using_history();
 
     rl_replace_line("x", 0);
     rl_point = 0;
@@ -2243,6 +2247,9 @@ static int test_vi_commands(void) {
     CHECK(rl_vi_eof_maybe(1, 4) == 0);
     CHECK(rl_done == 1);
     rl_done = 0;
+    /* Leave the global keymap in the emacs default for the probes that
+     * follow (callback/terminal assume the standard map). */
+    rl_emacs_editing_mode(1, 0);
 
     return 0;
 }

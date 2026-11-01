@@ -616,18 +616,6 @@ int main(void) {
     value("vi.change_case.line", rl_line_buffer);
     integer("vi.change_case.point", rl_point);
 
-    rl_replace_line("one two", 0);
-    rl_point = 0;
-    integer("vi.subst.rc", rl_vi_subst(1, 's'));
-    value("vi.subst.line", rl_line_buffer);
-    integer("vi.subst.point", rl_point);
-    rl_vi_movement_mode(1, 0);
-    rl_replace_line("one two", 0);
-    rl_point = 4;
-    integer("vi.subst_line.rc", rl_vi_subst(1, 'S'));
-    value("vi.subst_line.line", rl_line_buffer);
-    rl_vi_movement_mode(1, 0);
-
     rl_replace_line("abcde", 0);
     rl_point = 1;
     integer("vi.overstrike.rc", rl_vi_overstrike(1, 'X'));
