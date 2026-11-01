@@ -235,7 +235,7 @@ fn keymap_funmap_binding_and_argument_trimming() {
         unsafe { readline::rl_bind_key_in_map('u' as c_int, Some(universal), map) },
         0
     );
-    let trimmed = [b'u', b'5', b'x'];
+    let trimmed = *b"u5x";
     let result = unsafe {
         readline::rl_trim_arg_from_keyseq(trimmed.as_ptr() as *const c_char, trimmed.len(), map)
     };
@@ -248,7 +248,7 @@ fn keymap_funmap_binding_and_argument_trimming() {
         0
     );
     // A key sequence that is only a numeric argument is not trimmed.
-    let only_argument = [b'u', b'5'];
+    let only_argument = *b"u5";
     assert_eq!(
         unsafe {
             readline::rl_trim_arg_from_keyseq(

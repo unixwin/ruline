@@ -1065,7 +1065,9 @@ fn ansi_terminal(name: &str) -> bool {
     PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
-static TERMCAP: Mutex<Option<Vec<(&'static str, &'static [u8])>>> = Mutex::new(None);
+type TermcapEntry = (&'static str, &'static [u8]);
+
+static TERMCAP: Mutex<Option<Vec<TermcapEntry>>> = Mutex::new(None);
 
 fn initialize_termcap(name: Option<&str>) {
     let term = name

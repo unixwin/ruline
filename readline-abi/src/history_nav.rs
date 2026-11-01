@@ -986,7 +986,7 @@ fn isearch_dispatch(context: &mut ISearchContext, key: c_int) -> c_int {
         _ => {}
     }
 
-    if key < 0x20 || key >= 0x80 {
+    if !(0x20..0x80).contains(&key) {
         // ENDSRCH_CHAR: control/meta keys terminate and are re-executed.
         push_back_key(key);
         return 0;

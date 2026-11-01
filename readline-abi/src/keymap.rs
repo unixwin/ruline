@@ -2320,6 +2320,7 @@ pub unsafe extern "C" fn rl_set_key(
 
 /// Return the index in KEYSEQ following a leading numeric argument, or -1 when
 /// the sequence has no argument (GNU `rl_trim_arg_from_keyseq`).
+#[allow(clippy::unnecessary_cast)]
 #[no_mangle]
 pub unsafe extern "C" fn rl_trim_arg_from_keyseq(
     keyseq: *const c_char,

@@ -20,7 +20,7 @@
 //! vi delete/insert/change unit changed, including GNU's cursor placement.
 
 use std::ffi::{CStr, CString};
-use std::os::raw::c_int;
+use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -1070,7 +1070,7 @@ fn domove_motion(context: MotionContext) -> c_int {
     if !buffer.is_null() {
         // SAFETY: `ensure_line_capacity` reserved room for the blank and NUL.
         unsafe {
-            *buffer.add(saved_end as usize) = b' ';
+            *buffer.add(saved_end as usize) = b' ' as c_char;
             *buffer.add(saved_end as usize + 1) = 0;
         }
     }
