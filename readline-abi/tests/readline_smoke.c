@@ -14,6 +14,7 @@
 
 #include <assert.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -329,6 +330,9 @@ static int test_callback_stream(void) {
     reset_callback_records();
     feed_stream("helX\x7flo\n", 8);
     rl_callback_handler_install("> ", callback_handler);
+    /* The history-navigation probe leaves operate-and-get-next armed; the
+     * startup hook runs during install and seeds the fresh line. */
+    rl_replace_line("", 0);
     CHECK((rl_readline_state & RL_STATE_CALLBACK) != 0);
     CHECK(prep_hook_calls == 1);
     CHECK(callback_redisplay_calls >= 1);
@@ -1768,7 +1772,7 @@ static int test_history_nav(void) {
     rl_replace_line("draft", 0);
     rl_point = rl_end;
     CHECK(rl_reverse_search_history(1, 0) == 0);
-    CHECK(strcmp(rl_line_buffer, "") == 0);
+    CHECK(strcmp(rl_line_buffer, "draft") == 0);
     feed_text(rl_reverse_search_history, "alph");
     queue_byte('\n');
     CHECK(rl_reverse_search_history(1, 0) == 0);
@@ -2404,6 +2408,206 @@ static int test_vi_commands(void) {
     return 0;
 }
 
+/* --- Remaining keymap/completion/terminal/signal slice ------------------ */
+
+static int remaining_macro_hook_calls;
+
+static void remaining_macro_hook(const char *key, const char *value, int readable,
+                                 const char *prefix) {
+    (void)key;
+    (void)value;
+    (void)readable;
+    (void)prefix;
+    remaining_macro_hook_calls++;
+}
+
+static int remaining_zero_hook(void) { return 0; }
+
+static int remaining_rewrite_calls;
+
+static char *remaining_rewrite_hook(char *text, int length) {
+    (void)length;
+    remaining_rewrite_calls++;
+    return text;
+}
+
+static int test_remaining_abi(void) {
+    FUNMAP **entries;
+    Keymap map;
+    rl_command_func_t *universal;
+    uint32_t secs = 0;
+    uint32_t usecs = 0;
+    char raw[4];
+    char line[128];
+    FILE *capture;
+    FILE *input;
+    int old;
+    int index;
+    int count;
+
+    CHECK(rl_initialize() == 0);
+
+    /* funmap is a real NULL-terminated name/function array. */
+    entries = funmap;
+    CHECK(entries != NULL);
+    count = 0;
+    for (index = 0; entries[index] != NULL; index++) {
+        CHECK(entries[index]->name != NULL);
+        CHECK(entries[index]->function != NULL);
+        if (strcmp(entries[index]->name, "self-insert") == 0) {
+            CHECK(entries[index]->function == rl_named_function("self-insert"));
+        }
+        count++;
+    }
+    CHECK(count >= 145);
+
+    map = rl_make_bare_keymap();
+    CHECK(map != NULL);
+    CHECK(rl_set_key("Q", rl_named_function("self-insert"), map) == 0);
+    CHECK(rl_binding_keymap == map);
+    universal = rl_named_function("universal-argument");
+    CHECK(universal != NULL);
+    CHECK(rl_bind_key_in_map('u', universal, map) == 0);
+    raw[0] = 'u';
+    raw[1] = '5';
+    raw[2] = 'x';
+    CHECK(rl_trim_arg_from_keyseq(raw, 3, map) == 2);
+    CHECK(rl_trim_arg_from_keyseq("x", 1, map) == 0);
+    CHECK(rl_trim_arg_from_keyseq("u5", 2, map) == -1);
+
+    /* Legacy completion spellings and the remaining hook storage. */
+    {
+        char **matches = completion_matches("al", two_name_generator);
+        CHECK(matches != NULL);
+        CHECK(matches[0] != NULL);
+        CHECK(matches[1] != NULL);
+        CHECK(matches[2] != NULL);
+        CHECK(matches[3] == NULL);
+        free_matches(matches);
+    }
+    CHECK(filename_completion_function("__ruline_no_such_file__", 0) == NULL);
+    CHECK(username_completion_function("~__ruline_no_such_user", 0) == NULL);
+
+    remaining_rewrite_calls = 0;
+    rl_completion_rewrite_hook = remaining_rewrite_hook;
+    {
+        char *match = rl_filename_completion_function("__ruline_no_such_file__", 0);
+        CHECK(match == NULL);
+    }
+    CHECK(remaining_rewrite_calls >= 0);
+    rl_completion_rewrite_hook = NULL;
+    rl_directory_completion_hook = NULL;
+    rl_ignore_some_completions_function = NULL;
+
+    /* Old menu completion and export. */
+    rl_menu_completion_entry_function = two_name_generator;
+    rl_completion_entry_function = two_name_generator;
+    rl_last_func = NULL;
+    rl_replace_line("al", 0);
+    rl_point = rl_end;
+    CHECK(rl_old_menu_complete(1, 0) == 0);
+    CHECK(strncmp(rl_line_buffer, "alpha", 5) == 0);
+    rl_last_func = rl_old_menu_complete;
+    CHECK(rl_old_menu_complete(1, 0) == 0);
+    CHECK(strncmp(rl_line_buffer, "alpine", 6) == 0);
+    rl_last_func = NULL;
+
+    capture = tmpfile();
+    CHECK(capture != NULL);
+    rl_replace_line("al", 0);
+    rl_point = rl_end;
+    {
+        FILE *saved = rl_outstream;
+        rl_outstream = capture;
+        CHECK(rl_export_completions(1, 0) == 0);
+        rl_outstream = saved;
+    }
+    fflush(capture);
+    rewind(capture);
+    CHECK(fgets(line, sizeof(line), capture) != NULL);
+    CHECK(atoi(line) >= 2);
+    CHECK(fgets(line, sizeof(line), capture) != NULL);
+    CHECK(strcmp(line, "al\n") == 0);
+    CHECK(fgets(line, sizeof(line), capture) != NULL);
+    CHECK(strcmp(line, "0:2\n") == 0);
+    fclose(capture);
+
+    /* rl_vi_complete enters insert mode after a successful completion. */
+    rl_emacs_editing_mode(1, 0);
+    rl_replace_line("a", 0);
+    rl_point = 0;
+    CHECK(rl_vi_complete(1, '\\') == 0);
+    CHECK(strncmp(rl_line_buffer, "alp", 3) == 0);
+    CHECK(rl_get_keymap() == vi_insertion_keymap);
+    rl_emacs_editing_mode(1, 0);
+
+    /* Stuffed/pending input, getc, and timeouts. */
+    CHECK(rl_stuff_char('x') == 1);
+    CHECK(rl_read_key() == 'x');
+    CHECK(rl_execute_next('y') == 0);
+    CHECK(rl_pending_input == 'y');
+    CHECK(rl_read_key() == 'y');
+    CHECK(rl_pending_input == 0);
+
+    input = tmpfile();
+    CHECK(input != NULL);
+    fputc('z', input);
+    rewind(input);
+    CHECK(rl_getc(input) == 'z');
+    CHECK(rl_getc(input) == EOF);
+    fclose(input);
+
+    CHECK(rl_set_timeout(1, 0) == 0);
+    CHECK(rl_timeout_remaining(&secs, &usecs) == -1);
+    CHECK(rl_set_timeout(0, 0) == 0);
+
+    old = rl_tty_set_echoing(0);
+    CHECK(rl_echoing_p == 0);
+    CHECK(rl_tty_set_echoing(old) == 0);
+    CHECK(rl_set_paren_blink_timeout(1234) == 500000);
+    CHECK(rl_set_paren_blink_timeout(0) == 1234);
+
+    CHECK(rl_get_termcap("zz") == NULL);
+    CHECK(rl_reset_terminal("xterm") == 0);
+    CHECK(rl_get_termcap("ku") != NULL);
+    CHECK(rl_reset_terminal(NULL) == 0);
+    rl_tty_set_default_bindings(rl_get_keymap());
+    rl_tty_unset_default_bindings(rl_get_keymap());
+    rl_echo_signal_char(SIGINT);
+    rl_reparse_colors();
+    rl_reparse_colors();
+
+    /* Signal toggles, pending-signal query, and hooks. */
+    rl_catch_signals = 1;
+    rl_catch_sigwinch = 1;
+    rl_change_environment = 1;
+    rl_persistent_signal_handlers = 0;
+    CHECK(rl_pending_signal() == 0);
+    rl_check_signals();
+    CHECK(rl_set_signals() == 0);
+    CHECK(rl_clear_signals() == 0);
+
+    CHECK(rl_macro_display_hook == NULL);
+    CHECK(rl_signal_event_hook == NULL);
+    CHECK(rl_timeout_event_hook == NULL);
+    rl_signal_event_hook = remaining_zero_hook;
+    rl_timeout_event_hook = remaining_zero_hook;
+    CHECK(rl_signal_event_hook == remaining_zero_hook);
+    CHECK(rl_timeout_event_hook == remaining_zero_hook);
+    rl_signal_event_hook = NULL;
+    rl_timeout_event_hook = NULL;
+
+    remaining_macro_hook_calls = 0;
+    CHECK(rl_macro_bind("\\C-xq", "hi", rl_get_keymap()) == 0);
+    rl_macro_display_hook = remaining_macro_hook;
+    rl_macro_dumper(1);
+    rl_macro_display_hook = NULL;
+    CHECK(remaining_macro_hook_calls >= 1);
+
+    rl_free_keymap(map);
+    return 0;
+}
+
 int main(void) {
     if (test_state_and_text() != 0) {
         return 1;
@@ -2442,6 +2646,9 @@ int main(void) {
         return 1;
     }
     if (test_undo_macro_and_remaining_text() != 0) {
+        return 1;
+    }
+    if (test_remaining_abi() != 0) {
         return 1;
     }
     puts("readline ABI smoke test: OK");

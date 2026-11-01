@@ -158,7 +158,7 @@ fn input_available() -> bool {
         // SAFETY: the application owns the callback and promised this ABI.
         return unsafe { hook() } != 0;
     }
-    if state::pending_input() != 0 || pushed_available() {
+    if state::pending_input() != 0 || pushed_available() || terminal::stuffed_available() {
         return true;
     }
     if getc_function().is_some() {
@@ -179,6 +179,10 @@ fn read_byte() -> c_int {
         // SAFETY: clears the exported pending-input state.
         unsafe { terminal::rl_clear_pending_input() };
         return pending;
+    }
+
+    if let Some(byte) = terminal::pop_stuffed() {
+        return byte;
     }
 
     if let Some(getc) = getc_function() {
@@ -396,7 +400,7 @@ fn unbound_fallback(byte: u8) {
     }
 }
 
-fn run_command(pointer: *mut c_void, byte: u8) {
+fn run_command(pointer: *mut c_void, byte: u8, map: Keymap) {
     let Some(function) = function_from_pointer(pointer) else {
         unbound_fallback(byte);
         return;
@@ -405,6 +409,9 @@ fn run_command(pointer: *mut c_void, byte: u8) {
     let name = default_command_name(pointer);
     let before = snapshot();
     state::set_last_func(Some(function));
+    // GNU records the map and key that selected the command before invoking
+    // it (`_rl_dispatch_subseq`).
+    crate::keymap::set_executing_key(map, c_int::from(byte));
 
     terminal::add_state(terminal::RL_STATE_DISPATCHING);
     state::set_dispatching(1);
@@ -466,7 +473,7 @@ fn process_key(key: c_int, map: Keymap) {
             if entry.function.is_null() {
                 unbound_fallback(byte);
             } else {
-                run_command(entry.function, byte);
+                run_command(entry.function, byte, map);
             }
         }
         _ => unbound_fallback(byte),
@@ -509,6 +516,10 @@ fn callback_newline() {
 
     if !IN_HANDLER.swap(true, Ordering::SeqCst) {
         terminal::prep_for_input();
+        if terminal::persistent_signal_handlers() {
+            // SAFETY: persistent mode keeps readline's handlers across reads.
+            unsafe { terminal::rl_set_signals() };
+        }
     }
 
     crate::completion::run_startup_hook();
@@ -718,9 +729,12 @@ pub unsafe extern "C" fn rl_callback_read_char() {
         crate::completion::redisplay_with_hook();
     }
 
-    // SAFETY: returns the application's handlers after this call, matching
-    // GNU's non-persistent callback signal policy.
-    terminal::rl_clear_signals();
+    // GNU keeps the handlers installed across reads only when the application
+    // requested persistent signal handling.
+    if !terminal::persistent_signal_handlers() {
+        // SAFETY: returns the application's handlers after this call.
+        terminal::rl_clear_signals();
+    }
 }
 
 /// Drop transient callback state after a signal.  GNU clears search,

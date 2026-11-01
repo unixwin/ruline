@@ -203,7 +203,7 @@ pub(crate) fn read_key() -> c_int {
     // `next_macro_key` uses 0 for "the macro is exhausted"; `rl_read_key`
     // reports a negative value when there is no terminal to read from.
     match next_macro_key() {
-        0 => -1,
+        0 => crate::terminal::pop_stuffed().unwrap_or(-1),
         key => key,
     }
 }

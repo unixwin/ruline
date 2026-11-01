@@ -665,7 +665,8 @@ fn noninc_finish(context: NonIncContext) -> c_int {
 }
 
 fn noninc_search_command(direction: c_int) -> c_int {
-    let mut context = match noninc_context().take() {
+    let existing = { noninc_context().take() };
+    let mut context = match existing {
         Some(context) => context,
         None => noninc_init(direction),
     };
@@ -765,11 +766,20 @@ fn isearch_init(direction: c_int) -> ISearchContext {
     maybe_replace_line();
 
     let mut lines = history_lines();
-    let extra = saved_line_bytes().unwrap_or_else(line_buffer_bytes);
+    // GNU uses the saved history line only while editing an existing entry.
+    // At the end of the list the current line is the line to restore on
+    // abort; a stale saved line from an earlier search must not replace it.
+    let current_offset = where_history();
+    let editing_history = current_offset >= 0 && current_offset < lines.len() as c_int;
+    let extra = if editing_history {
+        saved_line_bytes().unwrap_or_else(line_buffer_bytes)
+    } else {
+        line_buffer_bytes()
+    };
     lines.push(extra);
 
     let line_count = lines.len() as c_int;
-    let save_line = where_history().clamp(0, line_count - 1);
+    let save_line = current_offset.clamp(0, line_count - 1);
     let sline = line_buffer_bytes();
     let sline_len = sline.len() as c_int;
     let sline_index = state::point().clamp(0, sline_len);
@@ -1086,7 +1096,8 @@ fn isearch_fini(context: &ISearchContext) {
 }
 
 fn isearch_command(direction: c_int) -> c_int {
-    let mut context = match isearch_context().take() {
+    let existing = { isearch_context().take() };
+    let mut context = match existing {
         Some(context) => context,
         None => {
             let context = isearch_init(direction);

@@ -187,7 +187,9 @@ fn history_navigation_and_search_commands() {
     set_line("draft");
     unsafe { readline::using_history() };
     assert_eq!(call("reverse-search-history", 1), 0);
-    assert_eq!(line(), "");
+    // GNU's isearch setup keeps the starting line in the buffer and only
+    // replaces the echo area; the search prompt does not clear rl_line_buffer.
+    assert_eq!(line(), "draft");
     feed("reverse-search-history", b"alph");
     queue_one(b'\n' as c_int);
     assert_eq!(call("reverse-search-history", 1), 0);

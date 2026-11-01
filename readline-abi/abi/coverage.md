@@ -17,9 +17,9 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 | Surface | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: |
-| Functions | 288 | 329 | 87.5% | 41 |
-| Globals | 96 | 110 | 87.3% | 14 |
-| **All** | **384** | **439** | **87.5%** | **55** |
+| Functions | 329 | 329 | 100.0% | 0 |
+| Globals | 110 | 110 | 100.0% | 0 |
+| **All** | **439** | **439** | **100.0%** | **0** |
 
 ## By area
 
@@ -27,59 +27,19 @@ readline-abi/scripts/abi-coverage.py --snapshot
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | state | 6/6 | 25/25 | 31 | 31 | 100.0% | 0 |
 | text | 140/140 | 0/0 | 140 | 140 | 100.0% | 0 |
-| keymap | 51/53 | 8/12 | 59 | 65 | 90.8% | 6 |
-| completion | 12/18 | 33/36 | 45 | 54 | 83.3% | 9 |
-| hooks | 0/0 | 8/11 | 8 | 11 | 72.7% | 3 |
-| history | 39/56 | 19/19 | 58 | 75 | 77.3% | 17 |
+| keymap | 53/53 | 12/12 | 65 | 65 | 100.0% | 0 |
+| completion | 18/18 | 36/36 | 54 | 54 | 100.0% | 0 |
+| hooks | 0/0 | 11/11 | 11 | 11 | 100.0% | 0 |
+| history | 56/56 | 19/19 | 75 | 75 | 100.0% | 0 |
 | callbacks | 4/4 | 0/0 | 4 | 4 | 100.0% | 0 |
-| terminal | 8/22 | 0/0 | 8 | 22 | 36.4% | 14 |
+| terminal | 22/22 | 0/0 | 22 | 22 | 100.0% | 0 |
 | display | 23/23 | 3/3 | 26 | 26 | 100.0% | 0 |
-| misc | 5/7 | 0/4 | 5 | 11 | 45.5% | 6 |
+| misc | 7/7 | 4/4 | 11 | 11 | 100.0% | 0 |
 
 ## Top missing groups
 
-1. **history** — 17 missing (58/75 implemented)
-2. **terminal** — 14 missing (8/22 implemented)
-3. **completion** — 9 missing (45/54 implemented)
-4. **keymap** — 6 missing (59/65 implemented)
-5. **misc** — 6 missing (5/11 implemented)
 
 ## Missing symbols
-
-### keymap (6)
-
-`funmap` `rl_binding_keymap` `rl_executing_key` `rl_executing_keymap`
-`rl_set_key` `rl_trim_arg_from_keyseq`
-
-### completion (9)
-
-`completion_matches` `filename_completion_function` `rl_completion_rewrite_hook` `rl_directory_completion_hook`
-`rl_export_completions` `rl_ignore_some_completions_function` `rl_old_menu_complete` `rl_vi_complete`
-`username_completion_function`
-
-### hooks (3)
-
-`rl_macro_display_hook` `rl_signal_event_hook` `rl_timeout_event_hook`
-
-### history (17)
-
-`rl_beginning_of_history` `rl_clear_history` `rl_end_of_history` `rl_fetch_history`
-`rl_forward_search_history` `rl_get_next_history` `rl_get_previous_history` `rl_history_search_backward`
-`rl_history_search_forward` `rl_history_substr_search_backward` `rl_history_substr_search_forward` `rl_noninc_forward_search`
-`rl_noninc_forward_search_again` `rl_noninc_reverse_search` `rl_noninc_reverse_search_again` `rl_operate_and_get_next`
-`rl_reverse_search_history`
-
-### terminal (14)
-
-`rl_echo_signal_char` `rl_execute_next` `rl_get_termcap` `rl_getc`
-`rl_read_key` `rl_reparse_colors` `rl_reset_terminal` `rl_set_paren_blink_timeout`
-`rl_set_timeout` `rl_stuff_char` `rl_timeout_remaining` `rl_tty_set_default_bindings`
-`rl_tty_set_echoing` `rl_tty_unset_default_bindings`
-
-### misc (6)
-
-`rl_catch_signals` `rl_catch_sigwinch` `rl_change_environment` `rl_check_signals`
-`rl_pending_signal` `rl_persistent_signal_handlers`
 
 ## Project extensions not in the GNU headers
 
@@ -87,6 +47,6 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 ## Audit notes
 
-- Library: `target/debug/libreadline.so` (385 ABI exports).
-- Headers: 385 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
+- Library: `target/debug/libreadline.so` (440 ABI exports).
+- Headers: 440 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
 - The ten legacy compatibility aliases wrapped in `#if 0` in the GNU header are included in the denominator: GNU's `compat.c` still exports them in `libreadline.so.8`.

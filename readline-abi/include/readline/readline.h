@@ -55,6 +55,15 @@ extern KEYMAP_ENTRY_ARRAY emacs_ctlx_keymap;
 extern KEYMAP_ENTRY_ARRAY vi_insertion_keymap;
 extern KEYMAP_ENTRY_ARRAY vi_movement_keymap;
 
+/* Name-to-function map.  `funmap` is a NULL-terminated array of entries owned
+ * by the library; names and function pointers remain valid for the process
+ * lifetime. */
+typedef struct _funmap {
+    const char *name;
+    rl_command_func_t *function;
+} FUNMAP;
+extern FUNMAP **funmap;
+
 /* Completion callback types.  These are the documented GNU spellings so that
  * application code can declare its own hooks without casts. */
 typedef char *rl_compentry_func_t(const char *, int);
@@ -73,6 +82,9 @@ typedef void rl_vintfunc_t(int);
  * EOF and interrupts. */
 typedef void rl_vcpfunc_t(char *);
 typedef int rl_compignore_func_t(char **);
+/* Application hook for printing one keyboard-macro binding:
+ * (key name, macro expansion, readable flag, keymap prefix). */
+typedef void rl_macro_print_func_t(const char *, const char *, int, const char *);
 
 /* Undo-list element.  This adapter does not build undo records yet, but
  * rl_undo_list and the rl_save_state layout are part of the public ABI. */
@@ -219,6 +231,13 @@ extern rl_command_func_t *rl_last_func;
 extern char *rl_executing_keyseq;
 extern int rl_key_sequence_length;
 
+/* Dispatch/binding keymaps and the key currently being dispatched.  The
+ * dispatcher updates these before invoking a bound command; the standalone
+ * keymap API updates rl_binding_keymap as bindings are made. */
+extern Keymap rl_executing_keymap;
+extern Keymap rl_binding_keymap;
+extern int rl_executing_key;
+
 /* Keymap and funmap management. */
 extern Keymap rl_get_keymap(void);
 extern void rl_set_keymap(Keymap);
@@ -254,6 +273,8 @@ extern int rl_bind_keyseq(const char *, rl_command_func_t *);
 extern int rl_bind_keyseq_in_map(const char *, rl_command_func_t *, Keymap);
 extern int rl_bind_keyseq_if_unbound(const char *, rl_command_func_t *);
 extern int rl_bind_keyseq_if_unbound_in_map(const char *, rl_command_func_t *, Keymap);
+extern int rl_set_key(const char *, rl_command_func_t *, Keymap);
+extern int rl_trim_arg_from_keyseq(const char *, size_t, Keymap);
 extern int rl_generic_bind(int, const char *, char *, Keymap);
 extern int rl_macro_bind(const char *, const char *, Keymap);
 extern int rl_unbind_key(int);
@@ -517,8 +538,65 @@ extern void rl_reset_after_signal(void);
 /* Drop a key queued through rl_pending_input. */
 extern int rl_clear_pending_input(void);
 
+/* Clear the history list (GNU's history management helper; distinct from the
+ * runtime `clear-history` command). */
+extern void rl_clear_history(void);
+
 /* Input timing.  Returns the previous timeout in microseconds. */
 extern int rl_set_keyboard_input_timeout(int);
+
+/* History navigation and search commands.  These operate on the exported
+ * history list and line buffer; search commands consume lookahead keys from
+ * rl_pending_input or an executing macro. */
+extern int rl_beginning_of_history(int, int);
+extern int rl_end_of_history(int, int);
+extern int rl_get_next_history(int, int);
+extern int rl_get_previous_history(int, int);
+extern int rl_fetch_history(int, int);
+extern int rl_operate_and_get_next(int, int);
+extern int rl_reverse_search_history(int, int);
+extern int rl_forward_search_history(int, int);
+extern int rl_history_search_backward(int, int);
+extern int rl_history_search_forward(int, int);
+extern int rl_history_substr_search_backward(int, int);
+extern int rl_history_substr_search_forward(int, int);
+extern int rl_noninc_forward_search(int, int);
+extern int rl_noninc_forward_search_again(int, int);
+extern int rl_noninc_reverse_search(int, int);
+extern int rl_noninc_reverse_search_again(int, int);
+
+/* Terminal input and capabilities.  rl_stuff_char queues a byte for the next
+ * rl_read_key; rl_execute_next queues it as pending input.  rl_set_timeout
+ * arms a per-readline timeout; rl_timeout_remaining reports the deadline once
+ * it has been started.  rl_get_termcap looks up a capability in the terminal
+ * description selected by TERM (or rl_reset_terminal). */
+extern int rl_stuff_char(int);
+extern int rl_execute_next(int);
+extern int rl_read_key(void);
+extern int rl_getc(FILE *);
+extern int rl_set_timeout(unsigned int, unsigned int);
+extern int rl_timeout_remaining(unsigned int *, unsigned int *);
+extern char *rl_get_termcap(const char *);
+extern int rl_reset_terminal(const char *);
+extern void rl_reparse_colors(void);
+extern int rl_set_paren_blink_timeout(int);
+extern void rl_echo_signal_char(int);
+
+/* Bind the terminal's erase/kill/word-erase/literal-next characters to their
+ * readline commands in KMAP; unset restores them to self-insert. */
+extern void rl_tty_set_default_bindings(Keymap);
+extern void rl_tty_unset_default_bindings(Keymap);
+extern int rl_tty_set_echoing(int);
+
+/* Signals caught by the library.  rl_catch_signals and rl_catch_sigwinch are
+ * honoured by rl_set_signals/rl_clear_signals; rl_change_environment controls
+ * updating LINES/COLUMNS when the size changes. */
+extern int rl_catch_signals;
+extern int rl_catch_sigwinch;
+extern int rl_change_environment;
+extern int rl_persistent_signal_handlers;
+extern int rl_pending_signal(void);
+extern void rl_check_signals(void);
 
 /* Completion entry points.  rl_complete_internal takes a command character:
  * '\t' (complete), '?' (list), '*' (insert all), '!'/'@' (complete and list).
@@ -539,6 +617,17 @@ extern char **rl_completion_matches(const char *, rl_compentry_func_t *);
 extern char *rl_filename_completion_function(const char *, int);
 extern char *rl_username_completion_function(const char *, int);
 
+/* Legacy compat.c spellings. */
+extern char **completion_matches(char *, rl_compentry_func_t *);
+extern char *filename_completion_function(const char *, int);
+extern char *username_completion_function(const char *, int);
+
+/* Old-style menu completion and the completion exporter.  The exporter writes
+ * one count/text/range line followed by the matches to rl_outstream. */
+extern int rl_old_menu_complete(int, int);
+extern int rl_export_completions(int, int);
+extern int rl_vi_complete(int, int);
+
 /* Print an argv-style match list in columns.  Application display hooks
  * receive (matches, num_matches, max_length).  rl_display_match_list prints
  * matches[1..len]; slot 0 is the common prefix. */
@@ -554,8 +643,11 @@ extern rl_compdisp_func_t *rl_completion_display_matches_hook;
 extern rl_cpvfunc_t *rl_completion_word_break_hook;
 
 extern rl_dequote_func_t *rl_filename_rewrite_hook;
+extern rl_dequote_func_t *rl_completion_rewrite_hook;
 extern rl_icppfunc_t *rl_filename_stat_hook;
 extern rl_icppfunc_t *rl_directory_rewrite_hook;
+extern rl_icppfunc_t *rl_directory_completion_hook;
+extern rl_compignore_func_t *rl_ignore_some_completions_function;
 extern rl_dequote_func_t *rl_filename_dequoting_function;
 extern rl_quote_func_t *rl_filename_quoting_function;
 extern rl_linebuf_func_t *rl_char_is_quoted_p;
@@ -591,6 +683,9 @@ extern rl_hook_func_t *rl_startup_hook;
 extern rl_hook_func_t *rl_pre_input_hook;
 extern rl_hook_func_t *rl_event_hook;
 extern rl_hook_func_t *rl_input_available_hook;
+extern rl_hook_func_t *rl_signal_event_hook;
+extern rl_hook_func_t *rl_timeout_event_hook;
+extern rl_macro_print_func_t *rl_macro_display_hook;
 extern rl_getc_func_t *rl_getc_function;
 extern rl_voidfunc_t *rl_redisplay_function;
 extern rl_vintfunc_t *rl_prep_term_function;

@@ -43,6 +43,9 @@ pub type RlCpvFunc = Option<unsafe extern "C" fn() -> *mut c_char>;
 pub type RlLinebufFunc = Option<unsafe extern "C" fn(*mut c_char, c_int) -> c_int>;
 /// `int (*)(void)` — startup/pre-input/event hook.
 pub type RlHookFunc = Option<unsafe extern "C" fn() -> c_int>;
+
+pub type RlMacroPrintFunc =
+    Option<unsafe extern "C" fn(*const c_char, *const c_char, c_int, *const c_char)>;
 /// `int (*)(FILE *)` — character input function.
 pub type RlGetcFunc = Option<unsafe extern "C" fn(*mut libc::FILE) -> c_int>;
 /// `void (*)(void)` — redisplay / terminal-deprep function.
@@ -72,6 +75,7 @@ const STAR: c_int = b'*' as c_int;
 const QUESTION: c_int = b'?' as c_int;
 const PERCENT: c_int = b'%' as c_int;
 const PIPE: c_int = b'|' as c_int;
+const EXPORT: c_int = b'$' as c_int;
 const DEFAULT_COMPLETION_COLUMNS: c_int = 80;
 
 // --- Exported completion state -------------------------------------------
@@ -90,9 +94,15 @@ pub static mut rl_completion_word_break_hook: RlCpvFunc = None;
 #[no_mangle]
 pub static mut rl_filename_rewrite_hook: RlDequoteFunc = None;
 #[no_mangle]
+pub static mut rl_completion_rewrite_hook: RlDequoteFunc = None;
+#[no_mangle]
 pub static mut rl_filename_stat_hook: RlIcppFunc = None;
 #[no_mangle]
 pub static mut rl_directory_rewrite_hook: RlIcppFunc = None;
+#[no_mangle]
+pub static mut rl_directory_completion_hook: RlIcppFunc = None;
+#[no_mangle]
+pub static mut rl_ignore_some_completions_function: RlIcppFunc = None;
 #[no_mangle]
 pub static mut rl_filename_dequoting_function: RlDequoteFunc = None;
 /// GNU's default filename quoting function: prefix the opening quote
@@ -188,6 +198,12 @@ pub static mut rl_event_hook: RlHookFunc = None;
 #[no_mangle]
 pub static mut rl_input_available_hook: RlHookFunc = None;
 #[no_mangle]
+pub static mut rl_signal_event_hook: RlHookFunc = None;
+#[no_mangle]
+pub static mut rl_timeout_event_hook: RlHookFunc = None;
+#[no_mangle]
+pub static mut rl_macro_display_hook: RlMacroPrintFunc = None;
+#[no_mangle]
 pub static mut rl_getc_function: RlGetcFunc = None;
 #[no_mangle]
 pub static mut rl_redisplay_function: RlVoidFunc = Some(line::rl_redisplay);
@@ -258,6 +274,24 @@ global_accessors!(
     directory_rewrite_hook,
     set_directory_rewrite_hook,
     rl_directory_rewrite_hook,
+    RlIcppFunc
+);
+global_accessors!(
+    completion_rewrite_hook,
+    set_completion_rewrite_hook,
+    rl_completion_rewrite_hook,
+    RlDequoteFunc
+);
+global_accessors!(
+    directory_completion_hook,
+    set_directory_completion_hook,
+    rl_directory_completion_hook,
+    RlIcppFunc
+);
+global_accessors!(
+    ignore_some_completions_function,
+    set_ignore_some_completions_function,
+    rl_ignore_some_completions_function,
     RlIcppFunc
 );
 global_accessors!(
@@ -434,6 +468,24 @@ global_accessors!(
     RlHookFunc
 );
 global_accessors!(
+    signal_event_hook,
+    set_signal_event_hook,
+    rl_signal_event_hook,
+    RlHookFunc
+);
+global_accessors!(
+    timeout_event_hook,
+    set_timeout_event_hook,
+    rl_timeout_event_hook,
+    RlHookFunc
+);
+global_accessors!(
+    macro_display_hook,
+    set_macro_display_hook,
+    rl_macro_display_hook,
+    RlMacroPrintFunc
+);
+global_accessors!(
     getc_function,
     set_getc_function,
     rl_getc_function,
@@ -494,6 +546,18 @@ struct MenuState {
 }
 
 static MENU_COMPLETION: Mutex<Option<MenuState>> = Mutex::new(None);
+
+struct OldMenuState {
+    orig_text: Vec<u8>,
+    entries: Vec<Vec<u8>>,
+    index: i32,
+    size: i32,
+    orig_start: c_int,
+    quote_char: c_char,
+    delimiter: c_int,
+}
+
+static OLD_MENU_COMPLETION: Mutex<Option<OldMenuState>> = Mutex::new(None);
 
 // --- Small C helpers ------------------------------------------------------
 
@@ -800,27 +864,32 @@ fn tilde_expand(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn apply_cpp_hook(hook: RlIcppFunc, bytes: &[u8]) -> Vec<u8> {
+    apply_cpp_hook_with_status(hook, bytes).0
+}
+
+/// Run an `rl_icppfunc_t` hook and report whether it claimed a modification
+/// (GNU's non-zero return).  The hook may replace the allocation.
+fn apply_cpp_hook_with_status(hook: RlIcppFunc, bytes: &[u8]) -> (Vec<u8>, bool) {
     let Some(hook) = hook else {
-        return bytes.to_vec();
+        return (bytes.to_vec(), false);
     };
     let allocation = bytes_to_c(bytes);
     if allocation.is_null() {
-        return bytes.to_vec();
+        return (bytes.to_vec(), false);
     }
     let mut pointer = allocation;
     // SAFETY: hook receives the address of a mutable C string and may replace
-    // it with another malloc-compatible allocation (the GNU contract).
-    unsafe { hook(&mut pointer) };
+    // it with another malloc-compatible allocation (the GNU contract).  A
+    // replacing hook owns and frees the previous allocation; freeing it here
+    // would double-free.
+    let changed = unsafe { hook(&mut pointer) != 0 };
     let result = if pointer.is_null() {
         bytes.to_vec()
     } else {
         c_bytes(pointer).to_vec()
     };
-    if pointer != allocation {
-        free_c(allocation);
-    }
     free_c(pointer);
-    result
+    (result, changed)
 }
 
 fn apply_dequote(bytes: &[u8], quote: c_int) -> Vec<u8> {
@@ -848,6 +917,31 @@ fn apply_dequote(bytes: &[u8], quote: c_int) -> Vec<u8> {
 
 fn apply_stat_hook(bytes: &[u8]) -> Vec<u8> {
     apply_cpp_hook(filename_stat_hook(), bytes)
+}
+
+/// Run `rl_completion_rewrite_hook` over the non-empty filename component.
+/// GNU passes the component length and expects a malloc-compatible string.
+fn apply_completion_rewrite(bytes: &[u8]) -> Vec<u8> {
+    let Some(function) = completion_rewrite_hook() else {
+        return bytes.to_vec();
+    };
+    let allocation = bytes_to_c(bytes);
+    if allocation.is_null() {
+        return bytes.to_vec();
+    }
+    // SAFETY: the hook receives a mutable filename component and its length;
+    // it returns either that pointer or a new malloc-compatible allocation.
+    let result_ptr = unsafe { function(allocation, bytes.len() as c_int) };
+    let result = if result_ptr.is_null() {
+        bytes.to_vec()
+    } else {
+        c_bytes(result_ptr).to_vec()
+    };
+    if result_ptr != allocation {
+        free_c(result_ptr);
+    }
+    free_c(allocation);
+    result
 }
 
 // --- Word scanning --------------------------------------------------------
@@ -1371,15 +1465,53 @@ fn remove_duplicate_matches(matches: *mut *mut c_char) -> *mut *mut c_char {
     array
 }
 
-fn postprocess_matches(matches: *mut *mut c_char, _matching_filenames: c_int) -> *mut *mut c_char {
+fn postprocess_matches(matches: *mut *mut c_char, matching_filenames: c_int) -> *mut *mut c_char {
     if matches.is_null() {
         return matches;
     }
-    if ignore_completion_duplicates() != 0 {
+    let matches = if ignore_completion_duplicates() != 0 {
         remove_duplicate_matches(matches)
     } else {
         matches
+    };
+
+    if matching_filenames != 0 {
+        if let Some(hook) = ignore_some_completions_function() {
+            let before = match_list_len(matches);
+            // SAFETY: the array is NULL-terminated; the application hook owns
+            // any entries it removes and may shift the remaining pointers.
+            unsafe { hook(matches) };
+            if matches.is_null() || unsafe { (*matches).is_null() } {
+                // GNU frees only the array here; removed entries are the
+                // application hook's responsibility.
+                unsafe { libc::free(matches as *mut libc::c_void) };
+                return ptr::null_mut();
+            }
+            let after = match_list_len(matches);
+            if after > 1 && after < before {
+                recompute_lcd(matches);
+            }
+        }
     }
+
+    matches
+}
+
+/// Recompute slot zero (the lowest common denominator) after an application
+/// ignore hook removed matches.  GNU overwrites the existing slot; this
+/// adapter replaces it with a fresh allocation.
+fn recompute_lcd(matches: *mut *mut c_char) {
+    let entries = c_strings(unsafe { matches.add(1) });
+    let lcd = compute_lcd(&entries);
+    let replacement = bytes_to_c(&lcd);
+    if replacement.is_null() {
+        return;
+    }
+    let previous = unsafe { *matches };
+    if previous != replacement {
+        free_c(previous);
+    }
+    unsafe { *matches = replacement };
 }
 
 // --- Display --------------------------------------------------------------
@@ -1680,6 +1812,13 @@ pub unsafe extern "C" fn rl_complete_internal(what_to_do: c_int) -> c_int {
     let text_len = comparison_text.len() as c_int;
 
     if matches.is_null() {
+        if what_to_do == EXPORT {
+            export_completions(matches, &text, start, end);
+            COMPLETION_CHANGED_BUFFER.store(false, Ordering::Relaxed);
+            state::set_readline_state(state::readline_state() & !line::RL_STATE_COMPLETING);
+            reset_completion_state();
+            return 0;
+        }
         // SAFETY: exported utility; rings the terminal bell.
         crate::line::rl_ding();
         LAST_COMPLETION_FAILED.store(true, Ordering::Relaxed);
@@ -1692,6 +1831,13 @@ pub unsafe extern "C" fn rl_complete_internal(what_to_do: c_int) -> c_int {
     let matching_filenames = filename_completion_desired();
     matches = postprocess_matches(matches, matching_filenames);
     if matches.is_null() {
+        if what_to_do == EXPORT {
+            export_completions(matches, &text, start, end);
+            COMPLETION_CHANGED_BUFFER.store(false, Ordering::Relaxed);
+            state::set_readline_state(state::readline_state() & !line::RL_STATE_COMPLETING);
+            reset_completion_state();
+            return 0;
+        }
         crate::line::rl_ding();
         LAST_COMPLETION_FAILED.store(true, Ordering::Relaxed);
         COMPLETION_CHANGED_BUFFER.store(false, Ordering::Relaxed);
@@ -1760,6 +1906,7 @@ pub unsafe extern "C" fn rl_complete_internal(what_to_do: c_int) -> c_int {
             }
         }
         PERCENT | PIPE => do_display = true,
+        EXPORT => export_completions(matches, &text, start, end),
         _ => {
             crate::line::rl_ding();
             free_match_list(matches);
@@ -1833,6 +1980,79 @@ pub unsafe extern "C" fn rl_completion_mode(cfunc: state::RlCommandFunc) -> c_in
     } else {
         TAB
     }
+}
+
+// --- Completion export ----------------------------------------------------
+
+fn write_out(stream: *mut libc::FILE, bytes: &[u8]) {
+    if stream.is_null() || bytes.is_empty() {
+        return;
+    }
+    // SAFETY: stream is the application-selected output FILE and bytes is a
+    // readable slice for the duration of the call.
+    unsafe {
+        libc::fwrite(
+            bytes.as_ptr() as *const libc::c_void,
+            1,
+            bytes.len(),
+            stream,
+        );
+    }
+}
+
+/// GNU `_rl_export_completions`: print a machine-readable match list.
+fn export_completions(matches: *mut *mut c_char, text: &[u8], start: c_int, end: c_int) {
+    let stream = state::effective_outstream();
+    if stream.is_null() {
+        return;
+    }
+    if state::readline_state() & crate::terminal::RL_STATE_TERMPREPPED != 0 {
+        write_out(stream, b"\r\n");
+    }
+    let count = match_list_len(matches);
+    write_out(stream, format!("{count}\n").as_bytes());
+    write_out(stream, text);
+    write_out(stream, b"\n");
+    write_out(stream, format!("{start}:{end}\n").as_bytes());
+
+    for index in 0..count {
+        // SAFETY: matches is NULL-terminated and index < count.
+        let entry = unsafe { *matches.add(index as usize) };
+        if entry.is_null() {
+            break;
+        }
+        let bytes = c_bytes(entry);
+        write_out(stream, bytes);
+        if filename_completion_desired() != 0 {
+            let path = bytes_path(&apply_stat_hook(&tilde_expand(bytes)));
+            if std::fs::metadata(&path)
+                .map(|info| info.is_dir())
+                .unwrap_or(false)
+            {
+                write_out(stream, b"/");
+            }
+        }
+        write_out(stream, b"\n");
+    }
+    // SAFETY: flush the application's output stream, as GNU does.
+    unsafe { libc::fflush(stream) };
+}
+
+/// Export the completions for the word at point.
+///
+/// Writes `N`, the original text, `start:end`, and each match (one per line)
+/// to `rl_outstream`.  With `count > 1` the line buffer is cleared after the
+/// export, matching GNU's `rl_export_completions`.
+#[no_mangle]
+pub unsafe extern "C" fn rl_export_completions(count: c_int, _key: c_int) -> c_int {
+    rl_complete_internal(EXPORT);
+    if count > 1 {
+        // SAFETY: deletes the exported word from the exported line buffer.
+        line::rl_delete_text(0, state::end());
+        state::set_point(0);
+        state::set_mark(0);
+    }
+    0
 }
 
 // --- Menu completion ------------------------------------------------------
@@ -2036,6 +2256,148 @@ pub unsafe extern "C" fn rl_backward_menu_complete(count: c_int, key: c_int) -> 
     rl_menu_complete(-count, key)
 }
 
+fn old_menu_lock() -> std::sync::MutexGuard<'static, Option<OldMenuState>> {
+    OLD_MENU_COMPLETION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Generate the old-style menu list without inserting the LCD.  GNU's
+/// `rl_old_menu_complete` starts at `matches[1]`; slot zero is only the
+/// common prefix and is used when the cycle wraps around.
+fn run_old_menu_generation() -> Option<OldMenuState> {
+    set_completion_defaults(b'%' as c_int);
+
+    let our_function = menu_completion_entry_function()
+        .or_else(current_entry_function)
+        .unwrap_or(rl_filename_completion_function);
+
+    let orig_end = state::point().max(0);
+    let mut found_quote = 0;
+    let mut delimiter = 0;
+    let mut quote_char = 0;
+    if state::point() > 0 {
+        quote_char = find_completion_word(&mut found_quote, &mut delimiter);
+    }
+    let orig_start = state::point().max(0);
+    state::set_point(orig_end);
+
+    let orig_text = copy_text(orig_start, orig_end);
+    let mut matches = gen_completion_matches(
+        &orig_text,
+        orig_start,
+        orig_end,
+        our_function,
+        found_quote,
+        quote_char,
+    );
+    if matches.is_null() {
+        // SAFETY: ding only touches terminal output.
+        unsafe { crate::line::rl_ding() };
+        return None;
+    }
+
+    matches = postprocess_matches(matches, filename_completion_desired());
+    if matches.is_null() {
+        // SAFETY: ding only touches terminal output.
+        unsafe { crate::line::rl_ding() };
+        return None;
+    }
+
+    let entries = c_strings(matches);
+    free_match_list(matches);
+    let size = entries.len() as i32;
+    Some(OldMenuState {
+        orig_text,
+        entries,
+        index: 0,
+        size,
+        orig_start,
+        quote_char,
+        delimiter,
+    })
+}
+
+/// GNU's original menu completion.  The first call (when the last command was
+/// not `rl_old_menu_complete`) regenerates the list; subsequent calls cycle
+/// through it, restoring the original text when the cycle wraps.
+#[no_mangle]
+pub unsafe extern "C" fn rl_old_menu_complete(count: c_int, invoking_key: c_int) -> c_int {
+    let last = ptr::addr_of!(state::rl_last_func).read();
+
+    let restart = {
+        let guard = old_menu_lock();
+        guard.is_none() || !same_command(last, Some(rl_old_menu_complete))
+    };
+
+    if restart {
+        set_completion_invoking_key(invoking_key);
+        state::set_readline_state(state::readline_state() | line::RL_STATE_COMPLETING);
+        let generated = run_old_menu_generation();
+        state::set_readline_state(state::readline_state() & !line::RL_STATE_COMPLETING);
+        let Some(generated) = generated else {
+            *old_menu_lock() = None;
+            COMPLETION_CHANGED_BUFFER.store(false, Ordering::Relaxed);
+            return 0;
+        };
+        *old_menu_lock() = Some(generated);
+    }
+
+    let snapshot = {
+        let mut guard = old_menu_lock();
+        let Some(menu) = guard.as_mut() else {
+            return 0;
+        };
+        if menu.size > 0 {
+            menu.index += count;
+            if menu.index < 0 {
+                while menu.index < 0 {
+                    menu.index += menu.size;
+                }
+            }
+            menu.index %= menu.size;
+        }
+        OldMenuState {
+            orig_text: menu.orig_text.clone(),
+            entries: menu.entries.clone(),
+            index: menu.index,
+            size: menu.size,
+            orig_start: menu.orig_start,
+            quote_char: menu.quote_char,
+            delimiter: menu.delimiter,
+        }
+    };
+
+    if snapshot.entries.is_empty() || snapshot.size == 0 {
+        // SAFETY: ding only touches terminal output.
+        unsafe { crate::line::rl_ding() };
+        COMPLETION_CHANGED_BUFFER.store(false, Ordering::Relaxed);
+        return 0;
+    }
+
+    let mut quote = snapshot.quote_char;
+    if snapshot.index == 0 && snapshot.size > 1 {
+        // SAFETY: ding only touches terminal output.
+        unsafe { crate::line::rl_ding() };
+        insert_match(
+            &snapshot.orig_text,
+            snapshot.orig_start,
+            MULT_MATCH,
+            &mut quote,
+        );
+    } else if let Some(entry) = snapshot
+        .entries
+        .get(usize::try_from(snapshot.index).unwrap_or(0))
+    {
+        insert_match(entry, snapshot.orig_start, SINGLE_MATCH, &mut quote);
+        let nontrivial = snapshot.orig_text.as_slice() != entry.as_slice();
+        append_to_match(entry, snapshot.delimiter, quote, nontrivial);
+    }
+
+    COMPLETION_CHANGED_BUFFER.store(true, Ordering::Relaxed);
+    0
+}
+
 // --- Application-callable generators -------------------------------------
 
 /// Build a match array by calling ENTRY_FUNCTION with state 0, 1, ...
@@ -2049,6 +2411,58 @@ pub unsafe extern "C" fn rl_completion_matches(
     entry_function: RlCompEntryFunc,
 ) -> *mut *mut c_char {
     generator_matches(text, entry_function)
+}
+
+/// Legacy `completion_matches` spelling from GNU's `compat.c`.
+#[no_mangle]
+pub unsafe extern "C" fn completion_matches(
+    text: *mut c_char,
+    entry_function: RlCompEntryFunc,
+) -> *mut *mut c_char {
+    rl_completion_matches(text, entry_function)
+}
+
+/// Vi-mode completion command.
+///
+/// Moves to the end of a non-blank word before completing (GNU's
+/// `rl_vi_complete`), then dispatches on the invoking key: `*` inserts all
+/// matches, `=` lists them, `\` performs ordinary tab completion, and any
+/// other key uses `rl_complete`.  `*` and `\` leave vi in insertion mode.
+#[no_mangle]
+pub unsafe extern "C" fn rl_vi_complete(_ignore: c_int, key: c_int) -> c_int {
+    if state::point() < state::end() && !crate::editing::whitespace(line_byte_at(state::point())) {
+        if !crate::editing::whitespace(line_byte_at(state::point() + 1)) {
+            crate::vi::rl_vi_end_word(1, b'E' as c_int);
+        }
+        if state::point() < state::end() {
+            let bytes = line_bytes();
+            state::set_point(crate::editing::next_position(
+                &bytes,
+                state::point().max(0) as usize,
+                1,
+            ) as c_int);
+        }
+    }
+
+    match key {
+        k if k == b'*' as c_int => {
+            rl_complete_internal(b'*' as c_int);
+        }
+        k if k == b'=' as c_int => {
+            rl_complete_internal(b'?' as c_int);
+        }
+        k if k == b'\\' as c_int => {
+            rl_complete_internal(TAB);
+        }
+        k => {
+            rl_complete(0, k);
+        }
+    }
+
+    if key == b'*' as c_int || key == b'\\' as c_int {
+        crate::vi::rl_vi_start_inserting(key, 1, state::argument_sign());
+    }
+    0
 }
 
 /// Filename completion generator.
@@ -2085,29 +2499,40 @@ pub unsafe extern "C" fn rl_filename_completion_function(
 
         let found_quote = completion_found_quote() != 0;
         let quote = completion_quote_character();
-        let users_dirname = if found_quote {
+        let mut users_dirname = if found_quote {
             apply_dequote(&dirname, quote)
         } else {
             dirname.clone()
         };
 
-        let expanded = tilde_expand(&dirname);
-        let expanded = if directory_rewrite_hook().is_some() {
-            apply_cpp_hook(directory_rewrite_hook(), &expanded)
+        let mut expanded = tilde_expand(&dirname);
+        if directory_rewrite_hook().is_some() {
+            expanded = apply_cpp_hook(directory_rewrite_hook(), &expanded);
+        } else if directory_completion_hook().is_some() {
+            let (updated, changed) =
+                apply_cpp_hook_with_status(directory_completion_hook(), &expanded);
+            expanded = updated;
+            if changed {
+                // GNU makes the completion hook's directory the spelling the
+                // user typed as well; the rewrite hook only changes the path
+                // passed to opendir().
+                users_dirname = expanded.clone();
+            }
         } else if found_quote {
             // GNU reconciles the already-dequoted users_dirname with the
             // expanded dirname; tilde expansion has already happened.
-            if dirname.starts_with(b"~") && !users_dirname.starts_with(b"~") {
+            expanded = if dirname.starts_with(b"~") && !users_dirname.starts_with(b"~") {
                 users_dirname.clone()
             } else {
                 tilde_expand(&users_dirname)
-            }
-        } else {
-            expanded
-        };
+            };
+        }
 
         if found_quote && !prefix.is_empty() {
             prefix = apply_dequote(&prefix, quote);
+        }
+        if !prefix.is_empty() && completion_rewrite_hook().is_some() {
+            prefix = apply_completion_rewrite(&prefix);
         }
 
         let mut entries = Vec::new();
@@ -2187,6 +2612,15 @@ pub unsafe extern "C" fn rl_filename_completion_function(
     bytes_to_c(&output)
 }
 
+/// Legacy `filename_completion_function` spelling from GNU's `compat.c`.
+#[no_mangle]
+pub unsafe extern "C" fn filename_completion_function(
+    text: *const c_char,
+    state_value: c_int,
+) -> *mut c_char {
+    rl_filename_completion_function(text, state_value)
+}
+
 /// Username completion generator.
 ///
 /// State 0 snapshots the matching records from `/etc/passwd`; later states
@@ -2240,6 +2674,15 @@ pub unsafe extern "C" fn rl_username_completion_function(
     bytes_to_c(&value)
 }
 
+/// Legacy `username_completion_function` spelling from GNU's `compat.c`.
+#[no_mangle]
+pub unsafe extern "C" fn username_completion_function(
+    text: *const c_char,
+    state_value: c_int,
+) -> *mut c_char {
+    rl_username_completion_function(text, state_value)
+}
+
 /// Refresh the cached screen dimensions and repaint.
 #[no_mangle]
 pub unsafe extern "C" fn rl_resize_terminal() {
@@ -2276,6 +2719,12 @@ mod tests {
         set_filename_rewrite_hook(None);
         set_filename_stat_hook(None);
         set_directory_rewrite_hook(None);
+        set_directory_completion_hook(None);
+        set_completion_rewrite_hook(None);
+        set_ignore_some_completions_function(None);
+        set_signal_event_hook(None);
+        set_timeout_event_hook(None);
+        set_macro_display_hook(None);
         set_filename_dequoting_function(None);
         set_filename_quoting_function(Some(default_quote_filename));
         set_char_is_quoted_p(None);
