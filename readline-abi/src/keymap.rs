@@ -277,6 +277,7 @@ pub(crate) fn set_emacs_mode() {
     let mut state = store();
     state.editing_mode = EditMode::Emacs;
     state.current = standard_keymap_ptr();
+    self::state::set_editing_mode(1);
 }
 
 fn ensure_initialized() {
@@ -290,6 +291,7 @@ fn ensure_initialized() {
         let mut state = store();
         state.current = standard_keymap_ptr();
         state.editing_mode = EditMode::Emacs;
+        crate::state::set_editing_mode(1);
         state.funmap = DEFAULT_FUNMAP
             .iter()
             .map(|(name, function)| FunmapEntry {
@@ -1202,11 +1204,13 @@ fn variable_bind_impl(state: &mut Store, name: &str, value: Option<&str>) -> c_i
         if text.len() >= 2 && text[..2].eq_ignore_ascii_case("vi") {
             state.editing_mode = EditMode::Vi;
             state.current = vi_insertion_keymap_ptr();
+            crate::state::set_editing_mode(0);
             return 0;
         }
         if text.len() >= 5 && text[..5].eq_ignore_ascii_case("emacs") {
             state.editing_mode = EditMode::Emacs;
             state.current = standard_keymap_ptr();
+            crate::state::set_editing_mode(1);
             return 0;
         }
         return 1;

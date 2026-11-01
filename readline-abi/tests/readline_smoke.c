@@ -637,6 +637,133 @@ static int test_state_and_text(void) {
     return 0;
 }
 
+static int test_display_and_state(void) {
+    FILE *saved_out;
+    FILE *capture;
+    char buffer[128];
+    size_t count;
+    struct readline_state saved;
+    rl_getc_func_t *saved_getc;
+    static const unsigned char csi_sequence[] = "12~";
+    static const unsigned char csi_incomplete[] = "1";
+
+    CHECK(rl_initialize() == 0);
+    CHECK(rl_gnu_readline_p == 1);
+    CHECK(rl_editing_mode == 1);
+    CHECK(rl_eof_found == 0);
+    CHECK(rl_dispatching == 0);
+    CHECK(rl_prefer_env_winsize == 0);
+    CHECK(rl_executing_macro == NULL);
+    CHECK(rl_undo_list == NULL);
+    CHECK(rl_erase_empty_line == 0);
+    CHECK(rl_already_prompted == 0);
+    CHECK(rl_num_chars_to_read == 0);
+    CHECK(rl_instream == stdin);
+    CHECK(rl_outstream == stdout);
+
+    CHECK(rl_character_len('a', 0) == 1);
+    CHECK(rl_character_len(0x01, 0) == 2);
+    CHECK(rl_character_len(0x7f, 0) == 2);
+    CHECK(rl_character_len(0x80, 0) == 1);
+    CHECK(rl_character_len('\t', 0) == 8);
+    CHECK(rl_character_len('\t', 3) == 5);
+
+    CHECK(rl_set_prompt("$ ") == 0);
+    capture = tmpfile();
+    CHECK(capture != NULL);
+    saved_out = rl_outstream;
+    rl_outstream = capture;
+
+    CHECK(rl_show_char(0x01) == 3);
+    fflush(capture);
+    rewind(capture);
+    count = fread(buffer, 1, sizeof(buffer), capture);
+    CHECK(count == 3);
+    CHECK(memcmp(buffer, "C-A", 3) == 0);
+
+    fflush(capture);
+    rewind(capture);
+    CHECK(rl_message("value=%d/%s", 7, "text") == 0);
+    CHECK(rl_display_prompt != NULL);
+    CHECK(strcmp(rl_display_prompt, "value=7/text") == 0);
+    CHECK(rl_clear_message() == 0);
+    CHECK(rl_display_prompt != NULL);
+    CHECK(strcmp(rl_display_prompt, "$ ") == 0);
+
+    CHECK(rl_refresh_line(1, 0) == 0);
+    CHECK(rl_clear_screen(1, 0) == 0);
+    rl_explicit_arg = 1;
+    CHECK(rl_clear_screen(1, 0) == 0);
+    rl_explicit_arg = 0;
+    CHECK(rl_clear_display(1, 0) == 0);
+    CHECK(crlf() == 0);
+
+    rl_outstream = saved_out;
+    fclose(capture);
+
+    CHECK(rl_set_prompt("one\ntwo") == 0);
+    CHECK(rl_on_new_line_with_prompt() == 0);
+    CHECK(rl_display_prompt != NULL);
+    CHECK(strcmp(rl_display_prompt, "one\ntwo") == 0);
+    rl_redraw_prompt_last_line();
+    CHECK(strcmp(rl_display_prompt, "one\ntwo") == 0);
+
+    rl_set_screen_size(24, 8);
+    rl_replace_line("abcdefghij", 0);
+    rl_point = 0;
+    CHECK(rl_next_screen_line(1, 0) == 0);
+    CHECK(rl_point == 8);
+    CHECK(rl_previous_screen_line(1, 0) == 0);
+    CHECK(rl_point == 0);
+
+    rl_replace_line("abcd", 0);
+    rl_point = 0;
+    rl_pending_input = 'C';
+    CHECK(rl_arrow_keys(1, 'C') == 0);
+    CHECK(rl_point == 1);
+    rl_pending_input = 'D';
+    CHECK(rl_arrow_keys(1, 'D') == 0);
+    CHECK(rl_point == 0);
+
+    saved_getc = rl_getc_function;
+    rl_getc_function = stream_getc;
+    feed_stream(csi_sequence, sizeof(csi_sequence) - 1);
+    CHECK(rl_skip_csi_sequence(1, 0) == 0);
+    feed_stream(csi_incomplete, sizeof(csi_incomplete) - 1);
+    CHECK(rl_skip_csi_sequence(1, 0) == 1);
+    rl_getc_function = saved_getc;
+
+    rl_replace_line("snapshot", 0);
+    rl_point = 3;
+    rl_mark = 2;
+    rl_done = 0;
+    CHECK(rl_save_state(&saved) == 0);
+    {
+        char *original = rl_line_buffer;
+        char *replacement = strdup("changed");
+        CHECK(replacement != NULL);
+        rl_line_buffer = replacement;
+        rl_end = 7;
+        rl_point = 1;
+        rl_mark = 0;
+        rl_done = 1;
+        CHECK(rl_restore_state(&saved) == 0);
+        CHECK(rl_line_buffer == original);
+        free(replacement);
+    }
+    CHECK(strcmp(rl_line_buffer, "snapshot") == 0);
+    CHECK(rl_point == 3);
+    CHECK(rl_mark == 2);
+    CHECK(rl_done == 0);
+
+    CHECK(rl_variable_bind("editing-mode", "vi") == 0);
+    CHECK(rl_editing_mode == 0);
+    CHECK(rl_emacs_editing_mode(1, 0) == 0);
+    CHECK(rl_editing_mode == 1);
+
+    return 0;
+}
+
 /* GNU rl_function_of_keyseq takes RAW key bytes, not a bind spelling.
  * Translate first; this is what the ABI contract requires. */
 static rl_command_func_t *lookup_keyseq(const char *spelling, Keymap map, int *type) {
@@ -1658,6 +1785,9 @@ static int test_history(void) {
 
 int main(void) {
     if (test_state_and_text() != 0) {
+        return 1;
+    }
+    if (test_display_and_state() != 0) {
         return 1;
     }
     if (test_keymap_and_binding() != 0) {

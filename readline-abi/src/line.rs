@@ -65,10 +65,7 @@ fn prompt_for_display(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn write_stdout(bytes: &[u8]) {
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
-    let _ = lock.write_all(bytes);
-    let _ = lock.flush();
+    crate::display::write_output(bytes);
 }
 
 fn write_stderr(bytes: &[u8]) {
@@ -79,10 +76,15 @@ fn write_stderr(bytes: &[u8]) {
 }
 
 pub(crate) fn initialize_line_state() {
+    state::initialize_streams();
+    state::initialize_terminal_name();
+    crate::display::initialize_display_state();
     state::reset_line_state();
     state::reset_argument();
     state::set_mark(0);
     state::set_done(0);
+    state::set_eof_found(0);
+    state::set_dispatching(0);
     state::set_insert_mode(1);
     state::set_last_func(None);
     state::set_key_sequence_length(0);

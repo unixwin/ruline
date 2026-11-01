@@ -17,15 +17,15 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 | Surface | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: |
-| Functions | 190 | 329 | 57.8% | 139 |
-| Globals | 83 | 110 | 75.5% | 27 |
-| **All** | **273** | **439** | **62.2%** | **166** |
+| Functions | 205 | 329 | 62.3% | 124 |
+| Globals | 96 | 110 | 87.3% | 14 |
+| **All** | **301** | **439** | **68.6%** | **138** |
 
 ## By area
 
 | Area | Functions | Globals | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| state | 4/6 | 15/25 | 19 | 31 | 61.3% | 12 |
+| state | 6/6 | 25/25 | 31 | 31 | 100.0% | 0 |
 | text | 60/140 | 0/0 | 60 | 140 | 42.9% | 80 |
 | keymap | 51/53 | 8/12 | 59 | 65 | 90.8% | 6 |
 | completion | 12/18 | 33/36 | 45 | 54 | 83.3% | 9 |
@@ -33,24 +33,18 @@ readline-abi/scripts/abi-coverage.py --snapshot
 | history | 36/56 | 19/19 | 55 | 75 | 73.3% | 20 |
 | callbacks | 4/4 | 0/0 | 4 | 4 | 100.0% | 0 |
 | terminal | 8/22 | 0/0 | 8 | 22 | 36.4% | 14 |
-| display | 10/23 | 0/3 | 10 | 26 | 38.5% | 16 |
+| display | 23/23 | 3/3 | 26 | 26 | 100.0% | 0 |
 | misc | 5/7 | 0/4 | 5 | 11 | 45.5% | 6 |
 
 ## Top missing groups
 
 1. **text** — 80 missing (60/140 implemented)
 2. **history** — 20 missing (55/75 implemented)
-3. **display** — 16 missing (10/26 implemented)
-4. **terminal** — 14 missing (8/22 implemented)
-5. **state** — 12 missing (19/31 implemented)
+3. **terminal** — 14 missing (8/22 implemented)
+4. **completion** — 9 missing (45/54 implemented)
+5. **keymap** — 6 missing (59/65 implemented)
 
 ## Missing symbols
-
-### state (12)
-
-`rl_dispatching` `rl_editing_mode` `rl_eof_found` `rl_executing_macro`
-`rl_gnu_readline_p` `rl_instream` `rl_outstream` `rl_prefer_env_winsize`
-`rl_restore_state` `rl_save_state` `rl_terminal_name` `rl_undo_list`
 
 ### text (80)
 
@@ -105,13 +99,6 @@ readline-abi/scripts/abi-coverage.py --snapshot
 `rl_set_timeout` `rl_stuff_char` `rl_timeout_remaining` `rl_tty_set_default_bindings`
 `rl_tty_set_echoing` `rl_tty_unset_default_bindings`
 
-### display (16)
-
-`crlf` `rl_already_prompted` `rl_arrow_keys` `rl_character_len`
-`rl_clear_display` `rl_clear_screen` `rl_erase_empty_line` `rl_message`
-`rl_next_screen_line` `rl_num_chars_to_read` `rl_on_new_line_with_prompt` `rl_previous_screen_line`
-`rl_redraw_prompt_last_line` `rl_refresh_line` `rl_show_char` `rl_skip_csi_sequence`
-
 ### misc (6)
 
 `rl_catch_signals` `rl_catch_sigwinch` `rl_change_environment` `rl_check_signals`
@@ -123,6 +110,6 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 ## Audit notes
 
-- Library: `target/debug/libreadline.so` (274 ABI exports).
-- Headers: 274 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
+- Library: `target/debug/libreadline.so` (302 ABI exports).
+- Headers: 302 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
 - The ten legacy compatibility aliases wrapped in `#if 0` in the GNU header are included in the denominator: GNU's `compat.c` still exports them in `libreadline.so.8`.

@@ -11,6 +11,7 @@
 
 mod callback;
 mod completion;
+mod display;
 mod editing;
 mod history;
 mod interactive;
@@ -22,6 +23,7 @@ mod terminal;
 
 pub use callback::*;
 pub use completion::*;
+pub use display::*;
 pub use editing::*;
 pub use history::*;
 pub use interactive::*;

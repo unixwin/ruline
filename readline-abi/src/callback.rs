@@ -218,7 +218,8 @@ fn read_byte() -> c_int {
 /// Read one key, running `rl_event_hook` while no input is available.
 ///
 /// `None` means a signal interrupted the read; the caller aborts the line.
-fn read_key() -> Option<c_int> {
+/// Display commands (`rl_skip_csi_sequence`, `rl_arrow_keys`) share this path.
+pub(crate) fn read_key() -> Option<c_int> {
     loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
             return None;
@@ -406,9 +407,11 @@ fn run_command(pointer: *mut c_void, byte: u8) {
     state::set_last_func(Some(function));
 
     terminal::add_state(terminal::RL_STATE_DISPATCHING);
+    state::set_dispatching(1);
     // SAFETY: the binding is an ABI command function; a default count of one
     // and the dispatching key match GNU `_rl_dispatch`.
     let _ = unsafe { function(1, c_int::from(byte)) };
+    state::set_dispatching(0);
     terminal::remove_state(terminal::RL_STATE_DISPATCHING);
 
     if let Some(name) = name {
@@ -531,11 +534,16 @@ fn finish_line(kind: LineEnd) {
     state::set_done(1);
     match kind {
         LineEnd::Accepted => terminal::add_state(terminal::RL_STATE_DONE),
-        LineEnd::Eof => terminal::add_state(terminal::RL_STATE_DONE | terminal::RL_STATE_EOF),
+        LineEnd::Eof => {
+            state::set_eof_found(1);
+            terminal::add_state(terminal::RL_STATE_DONE | terminal::RL_STATE_EOF);
+        }
         LineEnd::Aborted => terminal::add_state(terminal::RL_STATE_DONE),
     }
 
-    if matches!(kind, LineEnd::Accepted) {
+    if matches!(kind, LineEnd::Accepted)
+        && !(crate::display::erase_empty_line() != 0 && state::end() == 0)
+    {
         // GNU's final redisplay ends the accepted line before the handler runs.
         // SAFETY: writes one newline to the ABI output stream.
         unsafe { line::rl_crlf() };
@@ -679,6 +687,16 @@ pub unsafe extern "C" fn rl_callback_read_char() {
                     process_key(0x04, map);
                 } else {
                     process_key(key, map);
+                }
+
+                if finished.is_none()
+                    && crate::display::num_chars_to_read() > 0
+                    && state::end() >= crate::display::num_chars_to_read()
+                {
+                    // GNU stops collecting once rl_num_chars_to_read characters
+                    // have been inserted.
+                    state::set_done(1);
+                    terminal::add_state(terminal::RL_STATE_DONE);
                 }
 
                 if finished.is_none() && state::done() != 0 {
