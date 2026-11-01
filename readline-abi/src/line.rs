@@ -147,9 +147,9 @@ pub unsafe extern "C" fn rl_expand_prompt(prompt: *mut c_char) -> c_int {
 
 #[no_mangle]
 pub unsafe extern "C" fn rl_replace_line(text: *const c_char, clear_undo: c_int) {
-    // Undo history is not part of this milestone, so clear_undo has no work to
-    // do.  The line replacement itself is complete.
-    let _ = clear_undo;
+    if clear_undo != 0 {
+        crate::undo::rl_free_undo_list();
+    }
 
     let bytes = c_bytes(text);
     state::ensure_line_capacity(bytes.len() + 1);
@@ -195,6 +195,10 @@ pub unsafe extern "C" fn rl_insert_text(text: *const c_char) -> c_int {
         bytes.len(),
     );
 
+    if !crate::undo::is_undoing() {
+        crate::undo::record_insert(point, bytes.len() as c_int);
+    }
+
     state::set_point(point + bytes.len() as c_int);
     state::set_end(end + bytes.len() as c_int);
     bytes.len() as c_int
@@ -222,6 +226,10 @@ pub unsafe extern "C" fn rl_delete_text(from: c_int, to: c_int) -> c_int {
     let removed = stop - start;
     if removed <= 0 {
         return 0;
+    }
+
+    if !crate::undo::is_undoing() {
+        crate::undo::record_delete(start, stop);
     }
 
     state::ensure_line_capacity(end as usize + 1);
@@ -364,7 +372,13 @@ pub unsafe extern "C" fn rl_clear_visible_line() -> c_int {
 
 #[no_mangle]
 pub unsafe extern "C" fn rl_free_line_state() {
+    // GNU drops the undo list, any partial history entry, keyboard macros, and
+    // a pending numeric argument before the caller cleans up the terminal.
+    crate::undo::rl_free_undo_list();
+    crate::history::clear_current_history_data();
+    crate::macros::kill_kbd_macro();
     rl_clear_message();
+    state::reset_argument();
 }
 
 #[no_mangle]

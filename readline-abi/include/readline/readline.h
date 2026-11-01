@@ -227,6 +227,68 @@ extern int rl_clear_visible_line(void);
 extern void rl_free_line_state(void);
 extern int rl_reset_line_state(void);
 
+/* Undo.  An UNDO_LIST records how to reverse one buffer change; UNDO_DELETE
+ * means "re-insert the saved text", UNDO_INSERT means "delete start..end", and
+ * BEGIN/END bracket a group that is undone atomically.  The list is attached
+ * to history entries through HIST_ENTRY.data. */
+enum undo_code { UNDO_DELETE, UNDO_INSERT, UNDO_BEGIN, UNDO_END };
+
+typedef struct undo_list {
+    struct undo_list *next;
+    int start, end;
+    char *text;
+    enum undo_code what;
+} UNDO_LIST;
+
+extern UNDO_LIST *rl_undo_list;
+
+extern void rl_add_undo(enum undo_code, int, int, char *);
+extern void rl_free_undo_list(void);
+extern int rl_do_undo(void);
+extern int rl_begin_undo_group(void);
+extern int rl_end_undo_group(void);
+extern int rl_modifying(int, int);
+extern int rl_maybe_save_line(void);
+extern int rl_maybe_unsave_line(void);
+extern int rl_maybe_replace_line(void);
+extern int rl_revert_line(int, int);
+extern int rl_undo_command(int, int);
+
+/* Legacy compat.c spellings. */
+extern void free_undo_list(void);
+extern int maybe_save_line(void);
+extern int maybe_unsave_line(void);
+extern int maybe_replace_line(void);
+
+/* Keyboard macros.  rl_executing_macro is the malloc string currently being
+ * replayed; rl_push_macro_input transfers ownership of its argument. */
+extern char *rl_executing_macro;
+extern int rl_start_kbd_macro(int, int);
+extern int rl_end_kbd_macro(int, int);
+extern int rl_call_last_kbd_macro(int, int);
+extern int rl_print_last_kbd_macro(int, int);
+extern void rl_push_macro_input(char *);
+extern int rl_bracketed_paste_begin(int, int);
+extern int rl_paste_from_clipboard(int, int);
+
+/* Character search.  The target character comes from the input source
+ * (rl_pending_input or an executing macro in this standalone library). */
+extern int rl_char_search(int, int);
+extern int rl_backward_char_search(int, int);
+
+/* Remaining text commands: comment insertion, paren matching, tilde
+ * expansion, terminal status, output flow control, and history-argument
+ * yanks. */
+extern int rl_insert_comment(int, int);
+extern int rl_insert_close(int, int);
+extern int rl_tilde_expand(int, int);
+extern int rl_tty_status(int, int);
+extern int rl_execute_named_command(int, int);
+extern int rl_restart_output(int, int);
+extern int rl_stop_output(int, int);
+extern int rl_yank_nth_arg(int, int);
+extern int rl_yank_last_arg(int, int);
+
 /* Bindable editing commands.  Each `(int, int)` entry is the GNU command
  * signature: a numeric argument and the dispatching key.  Movement, insertion,
  * deletion, case conversion, transposition, mark handling, and the kill/yank
