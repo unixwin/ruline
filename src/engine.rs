@@ -2705,6 +2705,10 @@ impl Reedline {
                             let explicit =
                                 self.pending_arg.take().is_some_and(|arg| arg.explicit());
                             self.start_kbd_macro(explicit);
+                            // The invoking `(` is a command, not a
+                            // self-insert; the next character starts a
+                            // fresh typeahead run.
+                            typein_run = false;
                         }
                         ReedlineEvent::EndKbdMacro => {
                             // The keys that invoked end are not part of
