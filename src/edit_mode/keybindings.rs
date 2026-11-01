@@ -396,12 +396,13 @@ pub fn add_common_navigation_bindings(kb: &mut Keybindings) {
         ReedlineEvent::UntilFound(vec![ReedlineEvent::MenuDown, ReedlineEvent::Down]),
     );
 
-    // Jump to the start/end of the buffer
-    kb.add_binding(KM::ALT, KC::Char('<'), ReedlineEvent::ToStart);
-    kb.add_binding(KM::ALT, KC::Char('>'), ReedlineEvent::ToEnd);
-    // For kitty keyboard protocol
-    kb.add_binding(KM::SHIFT | KM::ALT, KC::Char(','), ReedlineEvent::ToStart);
-    kb.add_binding(KM::SHIFT | KM::ALT, KC::Char('.'), ReedlineEvent::ToEnd);
+    // `M-<`/`M->` are NOT bound here: in GNU's default maps they are
+    // beginning/end-of-history in emacs only (`\e<`/`\e>` —
+    // emacs_keymap.c:399/:401) and unbound in the vi maps
+    // (`bind -m vi-insert -p` reports both "not bound"). The emacs table
+    // binds them to the history events; helix re-adds its reedline-native
+    // buffer-start/end moves in `add_helix_navigation_overrides` since it
+    // has no GNU counterpart to conform to.
 }
 
 /// Rebind the navigation set for a mode that holds a selection open (vi

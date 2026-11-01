@@ -8,6 +8,36 @@ use crate::{
     Direction, EditCommand, MotionTarget,
 };
 
+/// The `M-<`/`M->` buffer-jump bindings helix had while they lived in
+/// [`add_common_navigation_bindings`]. GNU binds those keys to
+/// beginning/end-of-history in emacs only (`\e<`/`\e>`) and to nothing in
+/// the vi maps, so they moved out of the common set; helix is ruline-native
+/// and keeps its reedline behavior.
+pub(crate) fn add_helix_buffer_jump_bindings(kb: &mut Keybindings) {
+    use MotionTarget as MT;
+    kb.add_binding(
+        KeyModifiers::ALT,
+        KeyCode::Char('<'),
+        edit_bind(EditCommand::Move(MT::BufferEdge(Direction::Backward))),
+    );
+    kb.add_binding(
+        KeyModifiers::ALT,
+        KeyCode::Char('>'),
+        edit_bind(EditCommand::Move(MT::BufferEdge(Direction::Forward))),
+    );
+    // For kitty keyboard protocol
+    kb.add_binding(
+        KeyModifiers::SHIFT | KeyModifiers::ALT,
+        KeyCode::Char(','),
+        edit_bind(EditCommand::Move(MT::BufferEdge(Direction::Backward))),
+    );
+    kb.add_binding(
+        KeyModifiers::SHIFT | KeyModifiers::ALT,
+        KeyCode::Char('.'),
+        edit_bind(EditCommand::Move(MT::BufferEdge(Direction::Forward))),
+    );
+}
+
 /// Default Helix normal-mode keybindings.
 ///
 /// These cover the keys the modal layer in [`super::Helix`] does not interpret
@@ -20,6 +50,7 @@ pub fn default_helix_normal_keybindings() -> Keybindings {
     add_common_control_bindings(&mut kb);
     add_common_navigation_bindings(&mut kb);
     add_common_selection_bindings(&mut kb);
+    add_helix_buffer_jump_bindings(&mut kb);
     // Like vi normal mode: Backspace moves left, Delete deletes in place.
     kb.add_binding(
         KeyModifiers::NONE,
@@ -83,6 +114,7 @@ pub fn default_helix_insert_keybindings() -> Keybindings {
     add_common_navigation_bindings(&mut kb);
     add_common_edit_bindings(&mut kb);
     add_common_selection_bindings(&mut kb);
+    add_helix_buffer_jump_bindings(&mut kb);
 
     kb
 }

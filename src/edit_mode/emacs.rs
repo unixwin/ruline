@@ -49,13 +49,24 @@ pub fn default_emacs_keybindings() -> Keybindings {
     // readline sees the byte (signals.c rl_stop handles the caught
     // signal). With ISIG off there is no VSUSP delivery, so we bind the
     // suspend event directly to reproduce GNU's observable behavior.
-    // Undo is C-_ (emacs_keymap.c:66 `rl_undo_command`). crossterm
-    // decodes the 0x1f byte as Control-'7' (`\x1C`..`\x1F` maps to
-    // '4'..'7'), so the byte spelling is bound as well as the
-    // character the kitty protocol reports.
+    // Undo is C-_ (emacs_keymap.c:66 `rl_undo_command`). Terminals
+    // spell the 0x1f byte three ways: crossterm's ANSI parser decodes
+    // it as Control-'7' (`\x1C`..`\x1F` maps to '4'..'7'), the kitty
+    // protocol reports the '_' glyph, and Windows INPUT_RECORDs (the
+    // ConPTY path) surface as Control+Shift+'-' — which the
+    // `ReedlineRawEvent` ingest seam folds onto Control+'_'
+    // (`normalize_control_underscore`). Both surviving spellings bind.
     kb.add_binding(KM::CONTROL, KC::Char('_'), edit_bind(EC::Undo));
     kb.add_binding(KM::CONTROL, KC::Char('7'), edit_bind(EC::Undo));
-    kb.add_binding(KM::CONTROL, KC::Char('g'), edit_bind(EC::Redo));
+    // GNU `abort` — `rl_abort` (readline misc.c): cancels the current
+    // editing command and rings the bell. `bind -p` prints `"\C-g":
+    // abort`; the same slot sits in the vi-command map (`bind -m
+    // vi-command -p`). GNU readline has NO default `redo` binding at all
+    // (`bind -l` lists no `redo` function — only `vi-redo`, unbound), so
+    // the previous `Redo` binding here was an invention that also broke
+    // `C-g` aborting an active search: the engine's search dispatches
+    // abort on the `Esc` event.
+    kb.add_binding(KM::CONTROL, KC::Char('g'), ReedlineEvent::Esc);
     kb.add_binding(KM::CONTROL, KC::Char('z'), ReedlineEvent::Suspend);
     // GNU revert-line (undo.c:331): M-r and M-C-r undo every change to
     // the current line (emacs_keymap.c:445 and :336 respectively).
@@ -127,6 +138,40 @@ pub fn default_emacs_keybindings() -> Keybindings {
     kb.add_binding(KM::ALT, KC::Char('d'), edit_bind(EC::CutWordRight));
     // Edits
     kb.add_binding(KM::CONTROL, KC::Char('t'), edit_bind(EC::SwapGraphemes));
+
+    // GNU history jumps: `\e<`/`\e>` are beginning-of-history /
+    // end-of-history (emacs_keymap.c:399/:401 — `bind -p` shows
+    // `"\e<": beginning-of-history`, `"\e>": end-of-history`), NOT a
+    // buffer-edges move. `M->` returns to the live (new) line, which the
+    // engine's `last_history` models by leaving history traversal.
+    kb.add_binding(KM::ALT, KC::Char('<'), ReedlineEvent::FirstHistoryEntry);
+    kb.add_binding(KM::ALT, KC::Char('>'), ReedlineEvent::LastHistoryEntry);
+    // The shifted-glyph spellings terminals report. kitty names the base
+    // key: Shift+Alt+','/'.'. ConPTY pre-combines the ESC prefix into the
+    // INPUT_RECORD and keeps the SHIFT it took to reach the glyph, so the
+    // same press surfaces as Shift+Alt+'<'/'>' (measured with a ConPTY
+    // key probe). '<'/'>' have no case, so SHIFT is only the physical
+    // key's case marker there.
+    kb.add_binding(
+        KM::SHIFT | KM::ALT,
+        KC::Char(','),
+        ReedlineEvent::FirstHistoryEntry,
+    );
+    kb.add_binding(
+        KM::SHIFT | KM::ALT,
+        KC::Char('.'),
+        ReedlineEvent::LastHistoryEntry,
+    );
+    kb.add_binding(
+        KM::SHIFT | KM::ALT,
+        KC::Char('<'),
+        ReedlineEvent::FirstHistoryEntry,
+    );
+    kb.add_binding(
+        KM::SHIFT | KM::ALT,
+        KC::Char('>'),
+        ReedlineEvent::LastHistoryEntry,
+    );
 
     // *** ALT ***
     // Moves
@@ -329,9 +374,10 @@ impl Emacs {
 
     /// The `C-x` prefix table — GNU `emacs_ctlx_keymap`
     /// (emacs_keymap.c:597+): `(`/`)`/`e` are the keyboard-macro
-    /// commands, `C-u` is `rl_undo_command`, `C-g` aborts. Anything
-    /// else is unbound — GNU dings. Shift counts as the bare
-    /// character: the kitty protocol reports `(` as Shift-9.
+    /// commands, `C-u` is `rl_undo_command`, `C-g` aborts
+    /// (`bind -p`: `"\C-x\C-g": abort`). Anything else is unbound — GNU
+    /// dings. Shift counts as the bare character: the kitty protocol
+    /// reports `(` as Shift-9.
     fn resolve_ctrl_x(modifiers: KeyModifiers, code: KeyCode) -> ReedlineEvent {
         match (modifiers, code) {
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char('(')) => {
@@ -342,6 +388,8 @@ impl Emacs {
             }
             (KeyModifiers::NONE, KeyCode::Char('e')) => ReedlineEvent::CallLastKbdMacro,
             (KeyModifiers::CONTROL, KeyCode::Char('u')) => edit_bind(EditCommand::Undo),
+            // `C-x C-g` — GNU `abort` (the ctlx keymap's own C-g slot).
+            (KeyModifiers::CONTROL, KeyCode::Char('g')) => ReedlineEvent::Esc,
             // `C-x C-x` — GNU `exchange-point-and-mark`
             // (emacs_keymap.c:622).
             (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
@@ -620,6 +668,13 @@ mod test {
             emacs.parse_event(key('u', KeyModifiers::CONTROL)),
             ReedlineEvent::Edit(vec![EditCommand::Undo])
         );
+        // `C-x C-g` aborts — GNU binds the ctlx keymap's C-g slot to
+        // `abort` (`bind -p`: `"\C-x\C-g": abort`).
+        assert_eq!(emacs.parse_event(cx()), ReedlineEvent::Pending);
+        assert_eq!(
+            emacs.parse_event(key('g', KeyModifiers::CONTROL)),
+            ReedlineEvent::Esc
+        );
         // An unbound chord key dings (None) and clears the prefix —
         // the same key self-inserts on the next press.
         assert_eq!(emacs.parse_event(cx()), ReedlineEvent::Pending);
@@ -691,6 +746,112 @@ mod test {
             kb.find_binding(KeyModifiers::ALT, KeyCode::Char('t')),
             Some(ReedlineEvent::Edit(vec![EditCommand::SwapWords]))
         );
+    }
+
+    /// GNU `\e<`/`\e>` — beginning-of-history and end-of-history
+    /// (emacs_keymap.c:399/:401; `bind -p` prints `"\e<":
+    /// beginning-of-history`). They are NOT buffer-edge moves, and the
+    /// vi maps leave them unbound (`bind -m vi-insert -p` reports
+    /// "beginning-of-history (not bound)").
+    #[test]
+    fn meta_angle_brackets_jump_history_edges() {
+        let kb = default_emacs_keybindings();
+        assert_eq!(
+            kb.find_binding(KeyModifiers::ALT, KeyCode::Char('<')),
+            Some(ReedlineEvent::FirstHistoryEntry)
+        );
+        assert_eq!(
+            kb.find_binding(KeyModifiers::ALT, KeyCode::Char('>')),
+            Some(ReedlineEvent::LastHistoryEntry)
+        );
+        // The kitty protocol spells the shifted glyph keys Shift+Alt+','/'.'.
+        assert_eq!(
+            kb.find_binding(KeyModifiers::SHIFT | KeyModifiers::ALT, KeyCode::Char(',')),
+            Some(ReedlineEvent::FirstHistoryEntry)
+        );
+        assert_eq!(
+            kb.find_binding(KeyModifiers::SHIFT | KeyModifiers::ALT, KeyCode::Char('.')),
+            Some(ReedlineEvent::LastHistoryEntry)
+        );
+        // ConPTY pre-combines the ESC prefix and keeps the SHIFT it took
+        // to reach the glyph, so M-< surfaces as Shift+Alt+'<' (measured
+        // with a ConPTY key probe: `\x1b<` -> Char('<') SHIFT|ALT).
+        assert_eq!(
+            kb.find_binding(KeyModifiers::SHIFT | KeyModifiers::ALT, KeyCode::Char('<')),
+            Some(ReedlineEvent::FirstHistoryEntry)
+        );
+        assert_eq!(
+            kb.find_binding(KeyModifiers::SHIFT | KeyModifiers::ALT, KeyCode::Char('>')),
+            Some(ReedlineEvent::LastHistoryEntry)
+        );
+        // GNU's vi maps do not bind them; neither do ours.
+        for kb in [
+            crate::default_vi_insert_keybindings(),
+            crate::default_vi_normal_keybindings(),
+        ] {
+            assert_eq!(
+                kb.find_binding(KeyModifiers::ALT, KeyCode::Char('<')),
+                None,
+                "vi must leave M-< unbound like GNU"
+            );
+            assert_eq!(
+                kb.find_binding(KeyModifiers::ALT, KeyCode::Char('>')),
+                None,
+                "vi must leave M-> unbound like GNU"
+            );
+        }
+    }
+
+    /// GNU `abort` (readline `rl_abort`): plain `C-g` is bound to it in
+    /// the emacs standard keymap AND in vi-command (`bind -p`: `"\C-g":
+    /// abort`). GNU readline defines no `redo` function at all, so the
+    /// binding must not be `Edit(Redo)` — which also swallowed `C-g`
+    /// during an incremental search instead of aborting it (T2 F3).
+    #[test]
+    fn ctrl_g_is_abort_not_redo() {
+        let kb = default_emacs_keybindings();
+        assert_eq!(
+            kb.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            Some(ReedlineEvent::Esc)
+        );
+        // The vi-command map carries the same abort slot; vi-insert
+        // self-inserts C-g in GNU and stays unbound here.
+        assert_eq!(
+            crate::default_vi_normal_keybindings()
+                .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            Some(ReedlineEvent::Esc)
+        );
+        assert_eq!(
+            crate::default_vi_insert_keybindings()
+                .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            None
+        );
+    }
+
+    /// Every spelling of the `C-_` byte (0x1F) must parse to `Undo`:
+    /// the kitty glyph, crossterm's VT decoding Ctrl+'7', and the
+    /// ConPTY-measured Windows INPUT_RECORD spelling Control+Shift+'-'
+    /// (folded at the `ReedlineRawEvent` seam). T2 F1.
+    #[test]
+    fn every_c_underscore_spelling_parses_to_undo() {
+        let mut emacs = Emacs::default();
+        let spellings = [
+            (KeyCode::Char('_'), KeyModifiers::CONTROL),
+            (KeyCode::Char('7'), KeyModifiers::CONTROL),
+            (
+                KeyCode::Char('-'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        ];
+        for (code, modifiers) in spellings {
+            let raw = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers)))
+                .expect("key accepted");
+            assert_eq!(
+                emacs.parse_event(raw),
+                ReedlineEvent::Edit(vec![EditCommand::Undo]),
+                "spelling {code:?} + {modifiers:?} must undo"
+            );
+        }
     }
 
     #[test]

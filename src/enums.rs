@@ -1,6 +1,6 @@
 use crate::core_editor::EditCommandStatus;
 use crate::PromptEditMode;
-use crossterm::event::{Event, KeyEvent, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use strum::{EnumDiscriminants, EnumIter, EnumString, VariantArray};
 
@@ -1760,6 +1760,40 @@ impl From<EditCommandStatus> for EventStatus {
 /// [KeyEventKind::Press]).
 pub struct ReedlineRawEvent(Event);
 
+/// Fold the Windows INPUT_RECORD spelling of the `C-_` control byte
+/// (0x1F) onto the spelling the binding tables carry.
+///
+/// GNU readline receives byte 0x1F as `C-_` — bound to `undo` in the
+/// emacs map (`bind -p` prints `"\C-_": undo`; emacs_keymap.c:66).
+/// Terminals deliver it in three spellings:
+///
+/// - the raw VT byte, which crossterm's ANSI parser decodes as
+///   `CONTROL + '7'` (`0x1C..=0x1F` maps to Ctrl+'4'..'7'),
+/// - the kitty protocol, which reports the glyph as
+///   `CONTROL + '_'`,
+/// - Windows `INPUT_RECORD`s (the ConPTY path): conhost synthesizes
+///   VK_OEM_MINUS with `u_char` 0x1F and CTRL|SHIFT held, and
+///   crossterm's Windows backend re-derives the layout glyph for
+///   `0x00..=0x1f` u_chars via `ToUnicodeEx` on the virtual key
+///   (`get_char_for_key`), so the event surfaces as
+///   `CONTROL|SHIFT + '-'` (measured through a ConPTY key probe).
+///
+/// The tables bind the first two spellings; this ingest seam maps the
+/// third onto the kitty one so `C-_` reaches `Undo` on every platform.
+/// Shift is the case marker of the underscore glyph (`Shift+-`), so it
+/// carries no independent meaning under Ctrl; the un-shifted
+/// `CONTROL + '-'` is left alone — no measured path produces it for
+/// 0x1F, and kitty reports plain Ctrl+Minus as a distinct key.
+fn normalize_control_underscore(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    if modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        && matches!(code, KeyCode::Char('-') | KeyCode::Char('_'))
+    {
+        (KeyCode::Char('_'), KeyModifiers::CONTROL)
+    } else {
+        (code, modifiers)
+    }
+}
+
 impl TryFrom<Event> for ReedlineRawEvent {
     type Error = ();
 
@@ -1774,12 +1808,29 @@ impl TryFrom<Event> for ReedlineRawEvent {
                 modifiers,
                 kind: KeyEventKind::Repeat,
                 state,
-            }) => Ok(Self(Event::Key(KeyEvent {
+            }) => {
+                let (code, modifiers) = normalize_control_underscore(code, modifiers);
+                Ok(Self(Event::Key(KeyEvent {
+                    code,
+                    modifiers,
+                    kind: KeyEventKind::Press,
+                    state,
+                })))
+            }
+            Event::Key(KeyEvent {
                 code,
                 modifiers,
                 kind: KeyEventKind::Press,
                 state,
-            }))),
+            }) => {
+                let (code, modifiers) = normalize_control_underscore(code, modifiers);
+                Ok(Self(Event::Key(KeyEvent {
+                    code,
+                    modifiers,
+                    kind: KeyEventKind::Press,
+                    state,
+                })))
+            }
             other => Ok(Self(other)),
         }
     }
@@ -1788,5 +1839,61 @@ impl TryFrom<Event> for ReedlineRawEvent {
 impl From<ReedlineRawEvent> for Event {
     fn from(event: ReedlineRawEvent) -> Self {
         event.0
+    }
+}
+
+#[cfg(test)]
+mod raw_event_tests {
+    use super::*;
+
+    /// The ConPTY-measured spelling of the 0x1F byte must reach the mode
+    /// machines as `C-_` — the spelling bound to `Undo` (T2 F1).
+    #[test]
+    fn windows_control_shift_dash_folds_onto_control_underscore() {
+        for (code, modifiers) in [
+            (
+                KeyCode::Char('-'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (
+                KeyCode::Char('_'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        ] {
+            let raw =
+                ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap();
+            let Event::Key(normalized) = Event::from(raw) else {
+                panic!("expected a key event");
+            };
+            assert_eq!(
+                (normalized.code, normalized.modifiers),
+                (KeyCode::Char('_'), KeyModifiers::CONTROL)
+            );
+        }
+    }
+
+    /// Neither the VT-byte spelling (Ctrl+'7') nor a plain Ctrl+'-' nor
+    /// Shift+'-' printable input is rewritten.
+    #[test]
+    fn other_dash_spellings_pass_through_untouched() {
+        let untouched = [
+            (KeyCode::Char('7'), KeyModifiers::CONTROL),
+            (KeyCode::Char('-'), KeyModifiers::CONTROL),
+            (KeyCode::Char('-'), KeyModifiers::SHIFT),
+            (KeyCode::Char('-'), KeyModifiers::NONE),
+            (KeyCode::Char('_'), KeyModifiers::ALT),
+        ];
+        for (code, modifiers) in untouched {
+            let raw =
+                ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap();
+            let Event::Key(event) = Event::from(raw) else {
+                panic!("expected a key event");
+            };
+            assert_eq!(
+                (event.code, event.modifiers),
+                (code, modifiers),
+                "must pass through unchanged"
+            );
+        }
     }
 }

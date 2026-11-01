@@ -145,22 +145,16 @@ where
             let _ = input.next();
             Some(Command::RepeatLastAction)
         }
-        Some(&&o @ ('o' | 'O')) => match mode {
-            ViMode::Normal => {
-                let _ = input.next();
-                if o.is_ascii_lowercase() {
-                    Some(Command::NewlineBelow)
-                } else {
-                    Some(Command::NewlineAbove)
-                }
-            }
-            ViMode::Visual => {
-                let _ = input.next();
-                Some(Command::SwapCursorAndAnchor)
-            }
-            // This arm should be unreachable
-            ViMode::Insert => None,
-        },
+        // `o` swaps cursor and anchor in ruline's vi Visual extension.
+        // In Normal mode GNU's vi-command keymap leaves `o`/`O` UNBOUND
+        // (`bind -m vi-command -p` prints no `o`/`O` row; vim's
+        // open-below/above does not exist in readline), so they fall to
+        // the `_ => None` arm and the sequence parses as invalid — a
+        // no-op, with the NEXT key starting a fresh parse.
+        Some('o' | 'O') if mode == ViMode::Visual => {
+            let _ = input.next();
+            Some(Command::SwapCursorAndAnchor)
+        }
         Some(&&u @ ('u' | 'U')) if mode == ViMode::Visual => {
             let _ = input.next();
             if u.is_ascii_lowercase() {
@@ -202,8 +196,6 @@ pub(super) enum Command {
     DeleteCharBackward,
     ReplaceChar(char),
     SubstituteCharWithInsert,
-    NewlineAbove,
-    NewlineBelow,
     PasteAfter,
     PasteBefore,
     EnterViAppend,
@@ -267,8 +259,6 @@ impl Command {
             Self::EnterViAppend => vec![ReedlineOption::Edit(EditCommand::MoveRight {
                 select: false,
             })],
-            Self::NewlineAbove => vec![ReedlineOption::Edit(EditCommand::InsertNewlineAbove)],
-            Self::NewlineBelow => vec![ReedlineOption::Edit(EditCommand::InsertNewlineBelow)],
             Self::PasteAfter => vec![ReedlineOption::Edit(EditCommand::PasteCutBufferAfter)],
             Self::PasteBefore => vec![ReedlineOption::Edit(EditCommand::PasteCutBufferBefore)],
             Self::Undo => vec![ReedlineOption::Edit(EditCommand::Undo)],
