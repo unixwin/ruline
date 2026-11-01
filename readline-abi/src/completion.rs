@@ -691,6 +691,9 @@ pub(crate) fn run_startup_hook() {
         // SAFETY: the application owns this callback and promised this ABI.
         unsafe { hook() };
     }
+    // GNU runs its internal startup hook after the application hook.  The
+    // one-shot history hook implements operate-and-get-next.
+    crate::history_nav::run_saved_history_hook();
 }
 
 pub(crate) fn run_pre_input_hook() {

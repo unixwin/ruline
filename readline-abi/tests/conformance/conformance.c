@@ -825,6 +825,101 @@ int main(void) {
         unlink(path);
     }
 
+    section("history-nav");
+    clear_history();
+    add_history("one");
+    add_history("two");
+    add_history("three");
+    using_history();
+    rl_replace_line("draft", 0);
+    rl_point = rl_end;
+    rl_mark = 0;
+    integer("nav.prev.rc", rl_get_previous_history(1, 0));
+    value("nav.prev.line", rl_line_buffer);
+    integer("nav.prev.point", rl_point);
+    integer("nav.prev.end", rl_end);
+    integer("nav.prev.mark", rl_mark);
+    integer("nav.prev.where", where_history());
+    integer("nav.prev2.rc", rl_get_previous_history(1, 0));
+    value("nav.prev2.line", rl_line_buffer);
+    integer("nav.prev2.where", where_history());
+    integer("nav.next.rc", rl_get_next_history(1, 0));
+    value("nav.next.line", rl_line_buffer);
+    integer("nav.next2.rc", rl_get_next_history(1, 0));
+    value("nav.next2.line", rl_line_buffer);
+    integer("nav.next2.point", rl_point);
+    integer("nav.next2.mark", rl_mark);
+    integer("nav.next3.rc", rl_get_next_history(1, 0));
+    value("nav.next3.line", rl_line_buffer);
+    integer("nav.next3.where", where_history());
+    integer("nav.begin.rc", rl_beginning_of_history(1, 0));
+    value("nav.begin.line", rl_line_buffer);
+    integer("nav.begin.where", where_history());
+    integer("nav.end.rc", rl_end_of_history(1, 0));
+    value("nav.end.line", rl_line_buffer);
+    integer("nav.end.where", where_history());
+
+    rl_replace_line("draft", 0);
+    rl_point = rl_end;
+    rl_explicit_arg = 1;
+    integer("nav.fetch2.rc", rl_fetch_history(2, 0));
+    value("nav.fetch2.line", rl_line_buffer);
+    integer("nav.fetch2.where", where_history());
+    rl_explicit_arg = 0;
+    integer("nav.fetch2.end.rc", rl_end_of_history(1, 0));
+    value("nav.fetch2.end.line", rl_line_buffer);
+    integer("nav.fetch1.rc", rl_fetch_history(1, 0));
+    value("nav.fetch1.line", rl_line_buffer);
+    integer("nav.fetch1.where", where_history());
+    integer("nav.fetch1.end.rc", rl_end_of_history(1, 0));
+    value("nav.fetch1.end.line", rl_line_buffer);
+
+    integer("noninc.reverse_again.no_string",
+            rl_noninc_reverse_search_again(1, 0));
+    integer("noninc.forward_again.no_string",
+            rl_noninc_forward_search_again(1, 0));
+
+    clear_history();
+    add_history("alpha one");
+    add_history("beta two");
+    add_history("alphabet");
+    add_history("gamma alpha");
+    using_history();
+    rl_replace_line("al", 0);
+    rl_point = rl_end;
+    integer("histsearch.back.rc", rl_history_search_backward(1, 0));
+    value("histsearch.back.line", rl_line_buffer);
+    integer("histsearch.back.point", rl_point);
+    integer("histsearch.back.mark", rl_mark);
+    integer("histsearch.back.where", where_history());
+    integer("histsearch.back2.rc", rl_history_search_backward(1, 0));
+    value("histsearch.back2.line", rl_line_buffer);
+    integer("histsearch.back2.where", where_history());
+    integer("histsearch.forward.rc", rl_history_search_forward(1, 0));
+    value("histsearch.forward.line", rl_line_buffer);
+    integer("histsearch.forward.where", where_history());
+
+    using_history();
+    rl_replace_line("alpha", 0);
+    rl_point = rl_end;
+    integer("substr.back.rc", rl_history_substr_search_backward(1, 0));
+    value("substr.back.line", rl_line_buffer);
+    integer("substr.back.point", rl_point);
+    integer("substr.back.mark", rl_mark);
+    integer("substr.back.where", where_history());
+
+    clear_history();
+    add_history("one");
+    add_history("two");
+    using_history();
+    {
+        int base = history_base;
+        rl_clear_history();
+        integer("clear.length", history_length);
+        integer("clear.offset", history_offset);
+        integer("clear.base_preserved", history_base == base);
+    }
+
     section("completion");
     {
         char **matches = rl_completion_matches("al", generator);
