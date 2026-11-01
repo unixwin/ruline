@@ -1658,6 +1658,156 @@ static int test_history_abi(void) {
     return 0;
 }
 
+static void queue_byte(int key) { rl_pending_input = key; }
+
+static void feed_text(int (*command)(int, int), const char *text) {
+    for (; *text != '\0'; text++) {
+        rl_pending_input = (unsigned char)*text;
+        command(1, 0);
+    }
+}
+
+static int test_history_nav(void) {
+    HIST_ENTRY *entry;
+
+    clear_history();
+    add_history("one");
+    add_history("two");
+    add_history("three");
+    using_history();
+
+    /* No non-incremental search string has been recorded yet. */
+    CHECK(rl_noninc_reverse_search_again(1, 0) == 1);
+
+    rl_replace_line("draft", 0);
+    rl_point = rl_end;
+    CHECK(rl_get_previous_history(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "three") == 0);
+    CHECK(rl_point == rl_end);
+    CHECK(rl_mark == 0);
+
+    rl_replace_line("THREE", 0);
+    rl_point = rl_end;
+    CHECK(rl_get_next_history(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "draft") == 0);
+    CHECK(rl_point == rl_end);
+    entry = history_get(3);
+    CHECK(entry != NULL && strcmp(entry->line, "THREE") == 0);
+
+    CHECK(rl_get_previous_history(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "THREE") == 0);
+    CHECK(rl_beginning_of_history(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "one") == 0);
+    CHECK(rl_end_of_history(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "draft") == 0);
+
+    rl_replace_line("draft", 0);
+    rl_point = rl_end;
+    rl_explicit_arg = 1;
+    CHECK(rl_fetch_history(2, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "two") == 0);
+    CHECK(rl_end_of_history(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "draft") == 0);
+    CHECK(rl_fetch_history(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "one") == 0);
+    CHECK(rl_end_of_history(1, 0) == 0);
+
+    clear_history();
+    add_history("alpha one");
+    add_history("beta two");
+    add_history("alphabet");
+    add_history("gamma alpha");
+    using_history();
+
+    rl_replace_line("al", 0);
+    rl_point = rl_end;
+    CHECK(rl_history_search_backward(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "alphabet") == 0);
+    CHECK(rl_point == 2);
+    CHECK(rl_history_search_backward(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "alpha one") == 0);
+    CHECK(rl_history_search_forward(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "alphabet") == 0);
+
+    using_history();
+    rl_replace_line("alpha", 0);
+    rl_point = rl_end;
+    CHECK(rl_history_substr_search_backward(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "gamma alpha") == 0);
+    CHECK(rl_point == 6);
+    CHECK(rl_mark == rl_end);
+
+    clear_history();
+    add_history("alpha one");
+    add_history("beta two");
+    add_history("alphabet");
+    add_history("gamma alpha");
+    using_history();
+
+    rl_replace_line("draft", 0);
+    rl_point = rl_end;
+    feed_text(rl_noninc_reverse_search, "alphabet");
+    queue_byte('\n');
+    CHECK(rl_noninc_reverse_search(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "alphabet") == 0);
+    CHECK(rl_point == 0);
+    CHECK(rl_mark == rl_end);
+    CHECK(rl_noninc_reverse_search_again(1, 0) == 1);
+    CHECK(strcmp(rl_line_buffer, "alphabet") == 0);
+
+    using_history();
+    history_set_pos(0);
+    rl_replace_line("draft", 0);
+    rl_point = rl_end;
+    feed_text(rl_noninc_forward_search, "gamma");
+    queue_byte('\n');
+    CHECK(rl_noninc_forward_search(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "gamma alpha") == 0);
+
+    using_history();
+    rl_replace_line("draft", 0);
+    rl_point = rl_end;
+    CHECK(rl_reverse_search_history(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "") == 0);
+    feed_text(rl_reverse_search_history, "alph");
+    queue_byte('\n');
+    CHECK(rl_reverse_search_history(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "gamma alpha") == 0);
+    CHECK(rl_point == 6);
+
+    using_history();
+    rl_replace_line("draft", 0);
+    rl_point = rl_end;
+    CHECK(rl_reverse_search_history(1, 0) == 0);
+    queue_byte(7); /* C-g */
+    CHECK(rl_reverse_search_history(1, 0) == 1);
+    CHECK(strcmp(rl_line_buffer, "draft") == 0);
+
+    clear_history();
+    add_history("one");
+    add_history("two");
+    add_history("three");
+    using_history();
+    rl_replace_line("three", 0);
+    rl_point = rl_end;
+    rl_done = 0;
+    CHECK(rl_operate_and_get_next(1, 0) == 0);
+    CHECK(rl_done == 1);
+
+    clear_history();
+    {
+        int base = history_base;
+        rl_clear_history();
+        CHECK(history_length == 0);
+        CHECK(history_offset == 0);
+        CHECK(history_base == base);
+    }
+
+    clear_history();
+    rl_done = 0;
+    return 0;
+}
+
 static int test_history(void) {
     char path[512];
     char timestamp_path[512];
@@ -2277,6 +2427,9 @@ int main(void) {
         return 1;
     }
     if (test_history() != 0) {
+        return 1;
+    }
+    if (test_history_nav() != 0) {
         return 1;
     }
     if (test_terminal_and_screen_state() != 0) {
