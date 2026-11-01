@@ -512,6 +512,13 @@ fn noninc_dosearch(string: &[u8], direction: c_int) -> bool {
     };
 
     let old_position = where_history();
+    // The caller has just restored the saved search line, which need not be
+    // the text stored at `old_position` (GNU compares undo-list identity and
+    // therefore sees no edit).  Sync the buffer with the entry we are leaving
+    // so the first traversal does not write the restored line into it.
+    if let Some(bytes) = entry_line(unsafe { history::current_history() }) {
+        set_line_text(&bytes);
+    }
     NONINC_HISTORY_POS.store(position, Ordering::SeqCst);
     make_history_line_current(old_position, position);
 
@@ -665,7 +672,13 @@ fn noninc_finish(context: NonIncContext) -> c_int {
 }
 
 fn noninc_search_command(direction: c_int) -> c_int {
-    let mut context = match noninc_context().take() {
+    // Take without keeping the guard: `noninc_init` installs a fresh context
+    // and would deadlock if the match scrutinee guard stayed alive.
+    let existing = {
+        let mut guard = noninc_context();
+        guard.take()
+    };
+    let mut context = match existing {
         Some(context) => context,
         None => noninc_init(direction),
     };
@@ -1086,7 +1099,12 @@ fn isearch_fini(context: &ISearchContext) {
 }
 
 fn isearch_command(direction: c_int) -> c_int {
-    let mut context = match isearch_context().take() {
+    // As with the non-incremental path, drop the guard before the init arm.
+    let existing = {
+        let mut guard = isearch_context();
+        guard.take()
+    };
+    let mut context = match existing {
         Some(context) => context,
         None => {
             let context = isearch_init(direction);

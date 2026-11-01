@@ -417,6 +417,29 @@ extern int rl_emacs_editing_mode(int, int);
 extern int rl_digit_argument(int, int);
 extern int rl_universal_argument(int, int);
 
+/* History navigation and search.  The search commands follow GNU's
+ * `(count, key)` command signature.  An embedding application drives an
+ * active incremental or non-incremental search by placing the next key in
+ * `rl_pending_input` and invoking the command again; no terminal is read by
+ * the standalone library. */
+extern int rl_beginning_of_history(int, int);
+extern int rl_end_of_history(int, int);
+extern int rl_get_previous_history(int, int);
+extern int rl_get_next_history(int, int);
+extern int rl_fetch_history(int, int);
+extern int rl_operate_and_get_next(int, int);
+extern int rl_forward_search_history(int, int);
+extern int rl_reverse_search_history(int, int);
+extern int rl_history_search_backward(int, int);
+extern int rl_history_search_forward(int, int);
+extern int rl_history_substr_search_backward(int, int);
+extern int rl_history_substr_search_forward(int, int);
+extern int rl_noninc_forward_search(int, int);
+extern int rl_noninc_forward_search_again(int, int);
+extern int rl_noninc_reverse_search(int, int);
+extern int rl_noninc_reverse_search_again(int, int);
+extern void rl_clear_history(void);
+
 /* Vi-mode commands.  The standalone bodies operate on the line buffer; the
  * commands that need a following key consume `rl_pending_input` and otherwise
  * fail rather than blocking on a terminal read. */

@@ -184,10 +184,15 @@ fn history_navigation_and_search_commands() {
     assert_eq!(line(), "gamma alpha");
 
     // --- incremental reverse search ---------------------------------------
-    set_line("draft");
+    // Return to the current line first so the saved line left behind by the
+    // previous history search does not become the search's restore point.
     unsafe { readline::using_history() };
+    assert_eq!(call("end-of-history", 1), 0);
+    set_line("draft");
     assert_eq!(call("reverse-search-history", 1), 0);
-    assert_eq!(line(), "");
+    // Starting an incremental search leaves the current line in place; GNU
+    // only shows the search prompt in the echo area.
+    assert_eq!(line(), "draft");
     feed("reverse-search-history", b"alph");
     queue_one(b'\n' as c_int);
     assert_eq!(call("reverse-search-history", 1), 0);
@@ -196,6 +201,7 @@ fn history_navigation_and_search_commands() {
 
     // C-g aborts and restores the line where the search started.
     unsafe { readline::using_history() };
+    assert_eq!(call("end-of-history", 1), 0);
     set_line("draft");
     assert_eq!(call("reverse-search-history", 1), 0);
     queue_one(7);
