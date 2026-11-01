@@ -3,6 +3,7 @@ name = "readline-abi"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.95.0"
+authors = ["The ruline contributors"]
 license = "MIT"
 description = "Clean-room GNU readline 8.x C ABI adapter for ruline"
 publish = false

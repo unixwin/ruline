@@ -4,6 +4,11 @@ Clean-room GNU readline 8.x C ABI adapter for ruline.  The crate builds
 `libreadline.so` / `libreadline.a` and exports only the symbols declared in
 `include/readline/readline.h` and `include/readline/history.h`.
 
+The compatibility target is GNU readline; thank you to Chet Ramey and its
+contributors for the documented interface. We do not copy GPL code or header
+text: the declarations are clean-room and the symbol inventory is names only.
+See [`../ACKNOWLEDGMENTS.md`](../ACKNOWLEDGMENTS.md).
+
 ## Build
 
 ```sh

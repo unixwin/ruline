@@ -31,6 +31,9 @@ Those extras never change ABI-visible state or the bytes a plugin sees.
 - The initial code base is reedline 0.52.1, MIT licensed. The original
   copyright notice is retained in full in [`LICENSE`](./LICENSE); the history
   and attribution are recorded in [`UPSTREAM.md`](./UPSTREAM.md).
+- **Thank you** to the Nushell Project and every reedline contributor. Their
+  MIT-licensed work is the foundation of this project. See
+  [`ACKNOWLEDGMENTS.md`](./ACKNOWLEDGMENTS.md) for the full acknowledgement.
 - ruline is an independent project. We do not merge nushell/reedline, do not
   send fixes upstream as a matter of course, and do not follow its edition,
   feature or API policy.
@@ -52,6 +55,7 @@ Those extras never change ABI-visible state or the bytes a plugin sees.
 - [Default keybindings](./KEYBINDINGS.md)
 - [Crate features](#crate-features)
 - [Status and roadmap](#status-and-roadmap)
+- [Acknowledgements](./ACKNOWLEDGMENTS.md)
 - [Contributing](./CONTRIBUTING.md)
 - [Alternatives](#alternatives)
 
@@ -280,6 +284,20 @@ The GNU readline compatibility work is the current focus:
 
 Non-goals: byte-identical internals of GNU readline, zsh/zle plugin support,
 and sharing ABI state with a separately linked `libreadline` instance.
+
+## Acknowledgements
+
+ruline is independent, but it stands on other people's work. Thank you to:
+
+- the **Nushell Project and every reedline contributor** — the MIT-licensed
+  code base we started from, and the original copyright notice we keep in
+  [`LICENSE`](./LICENSE);
+- **Chet Ramey and the GNU readline contributors** — the behavioural oracle
+  for the ABI work. No GPL code or headers are copied; the C declarations are
+  clean-room;
+- the Rust crates in `Cargo.lock` and their maintainers.
+
+See [`ACKNOWLEDGMENTS.md`](./ACKNOWLEDGMENTS.md) for details.
 
 ### Alternatives
 

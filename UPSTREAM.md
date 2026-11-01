@@ -18,6 +18,11 @@ Everything after that starting point is ruline's own code and policy:
   existing source and the niubash patch entry keep compiling. The product name
   is **ruline**; the crate rename is tracked separately.
 
+Thank you to the Nushell Project and every reedline contributor: their
+MIT-licensed work is the foundation of ruline. See
+[`ACKNOWLEDGMENTS.md`](./ACKNOWLEDGMENTS.md) for the full attribution,
+including the GNU readline team whose interface we target.
+
 ## Starting point
 
 - Base: reedline 0.52.1 (MIT), fork point retained in the git history.
