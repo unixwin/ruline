@@ -1729,9 +1729,13 @@ pub enum ReedlineEvent {
     PrintLastKbdMacro,
 }
 
+/// What an edit mode or event handler did with one event.
 pub enum EventStatus {
+    /// The event applied; stop the fallback chain.
     Handled,
+    /// The event did not apply; a binding may fall through to the next one.
     Inapplicable,
+    /// The event ends the editing session with the carried signal.
     Exits(Signal),
 }
 

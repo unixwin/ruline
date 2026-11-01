@@ -53,6 +53,7 @@ use {
             Arc,
         },
         time::Duration,
+        time::Instant,
         time::SystemTime,
     },
 };
@@ -72,6 +73,10 @@ const EVENTS_THRESHOLD: usize = 10;
 /// for features that require periodic processing (e.g., external printer,
 /// idle callback).
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Default wait for the next key of a multi-key sequence, matching readline's
+/// `keyseq-timeout`.
+const DEFAULT_KEYSEQ_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Determines if inputs should be used to extend the regular line buffer,
 /// traverse the history in the standard prompt or edit the search string in the
@@ -439,6 +444,14 @@ pub struct Reedline {
     // require periodic processing (external printer, idle callback).
     // Only used when external_printer or idle_callback is configured.
     poll_interval: Duration,
+
+    // How long to wait for the next key of a multi-key sequence before
+    // flushing the pending prefix.
+    keyseq_timeout: Duration,
+
+    // Deadline for the pending sequence, set lazily when one starts and reset
+    // after every key that arrives.
+    keyseq_deadline: Option<Instant>,
 
     external_printer: Option<Box<dyn ExternalOutput>>,
 
@@ -1084,6 +1097,8 @@ impl Reedline {
             break_signal: None,
             repaint_signal: None,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            keyseq_timeout: DEFAULT_KEYSEQ_TIMEOUT,
+            keyseq_deadline: None,
             external_printer: None,
             idle_callback: None,
         }
@@ -1817,6 +1832,10 @@ impl Reedline {
     /// ExternalBreak) for the painter to resume from.
     fn begin_read(&mut self) -> Option<PainterSuspendedState> {
         self.hide_hints = false;
+        self.keyseq_deadline = None;
+        // A sequence abandoned by a break, Ctrl-C or submit belongs to the
+        // previous call, not this prompt.
+        self.edit_mode.reset_pending_sequence();
 
         // The last command context belongs to the previous call. Only a
         // submit in this call may set it again, so a host command, Ctrl-C
@@ -1908,17 +1927,28 @@ impl Reedline {
             let mut events: Vec<Event> = vec![];
 
             if !self.immediately_accept {
-                if !self.pending_input.is_empty() {
-                    // Replayed keys are already input: skip the terminal
-                    // read entirely so a KeySequence never blocks behind a
-                    // keystroke that has not arrived.
-                } else if self.input_needs_polling() || completer_pending {
-                    if event::poll(self.poll_interval)? {
+                if self.pending_input.is_empty() {
+                    let keyseq_wait = self.keyseq_remaining();
+                    if self.input_needs_polling() || completer_pending || keyseq_wait.is_some() {
+                        // With a sequence pending, wake at its deadline even when
+                        // the ordinary poll interval is longer.
+                        let timeout = keyseq_wait
+                            .map_or(self.poll_interval, |wait| wait.min(self.poll_interval));
+                        if event::poll(timeout)? {
+                            events.push(crossterm::event::read()?);
+                        } else if keyseq_wait.is_some()
+                            && self.keyseq_remaining().is_some_and(|wait| wait.is_zero())
+                        {
+                            // No key before the sequence timeout: flush the prefix.
+                            match self.flush_pending_keyseq(prompt)? {
+                                ControlFlow::Break(signal) => return Ok(signal),
+                                ControlFlow::Continue(()) => continue,
+                            }
+                        }
+                    } else {
+                        // Block until we receive an event
                         events.push(crossterm::event::read()?);
                     }
-                } else {
-                    // Block until we receive an event
-                    events.push(crossterm::event::read()?);
                 }
 
                 // Receive all events in the queue without blocking. Will stop when
@@ -1975,7 +2005,13 @@ impl Reedline {
             // `events` stays empty, but `process_input_batch` still pushes the
             // synthetic `Submit` and returns the buffer. Gating this call behind
             // `!immediately_accept` would spin the loop forever.
+            // A key that arrived starts the next per-key timeout window; an
+            // empty iteration must keep the deadline it already has.
+            let had_events = !events.is_empty();
             let batch_result = self.process_input_batch(prompt, events)?;
+            if had_events {
+                self.keyseq_deadline = None;
+            }
             self.settle_paste_burst();
             if let ControlFlow::Break(signal) = batch_result {
                 return Ok(signal);
@@ -2701,6 +2737,16 @@ impl Reedline {
             reedline_events.push((ReedlineEvent::Submit, 0));
         }
 
+        self.process_reedline_events(prompt, reedline_events)
+    }
+
+    /// Run a batch of already-parsed events, repaint if anything changed, and
+    /// report an exit. Shared by the input loop and the key-sequence timeout.
+    fn process_reedline_events(
+        &mut self,
+        prompt: &dyn Prompt,
+        reedline_events: Vec<(ReedlineEvent, u16)>,
+    ) -> Result<ControlFlow<Signal>> {
         // The mode machine has parsed this batch, so the rest policy it
         // declares is now final. Relay it to the editor before running the
         // emitted commands so a command a mode transition issued (e.g. the
@@ -2784,6 +2830,33 @@ impl Reedline {
             let _ = prompt;
             Ok(EventStatus::Inapplicable)
         }
+    }
+
+    /// Time left before a pending multi-key sequence is flushed, or `None`
+    /// when nothing is pending.
+    ///
+    /// The deadline starts with the first pending key and is reset after every
+    /// key that arrives, so the timeout is the wait for the *next* key of the
+    /// sequence, matching readline's `keyseq-timeout`.
+    fn keyseq_remaining(&mut self) -> Option<Duration> {
+        if !self.edit_mode.has_pending_sequence() {
+            self.keyseq_deadline = None;
+            return None;
+        }
+        let deadline = *self
+            .keyseq_deadline
+            .get_or_insert_with(|| Instant::now() + self.keyseq_timeout);
+        Some(deadline.saturating_duration_since(Instant::now()))
+    }
+
+    /// Flush a pending sequence whose deadline has passed.
+    fn flush_pending_keyseq(&mut self, prompt: &dyn Prompt) -> Result<ControlFlow<Signal>> {
+        self.keyseq_deadline = None;
+        let event = self.edit_mode.flush_pending_sequence();
+        if event == ReedlineEvent::None {
+            return Ok(ControlFlow::Continue(()));
+        }
+        self.process_reedline_events(prompt, vec![(event, 0)])
     }
 
     fn handle_event(&mut self, prompt: &dyn Prompt, event: ReedlineEvent) -> Result<EventStatus> {
@@ -2876,7 +2949,7 @@ impl Reedline {
         let status = if self.input_mode == InputMode::HistorySearch {
             self.handle_history_search_event(event)
         } else if self.input_mode == InputMode::NonIncrementalSearch {
-            self.handle_noninc_search_event(prompt, event)
+            self.handle_noninc_search_event(event)
         } else {
             self.handle_editor_event(prompt, event)
         };
@@ -3050,15 +3123,11 @@ impl Reedline {
     /// `_rl_nsearch_dispatch` (search.c:295): the buffer is the search
     /// string, `Enter` commits, `C-g`/`C-c`/`Esc` abort and restore,
     /// `Backspace` on an empty buffer aborts, ordinary edits apply.
-    fn handle_noninc_search_event(
-        &mut self,
-        prompt: &dyn Prompt,
-        event: ReedlineEvent,
-    ) -> io::Result<EventStatus> {
+    fn handle_noninc_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
         match event {
             ReedlineEvent::UntilFound(events) | ReedlineEvent::Multiple(events) => {
                 for event in events {
-                    match self.handle_noninc_search_event(prompt, event)? {
+                    match self.handle_noninc_search_event(event)? {
                         EventStatus::Inapplicable => {}
                         success => {
                             return Ok(success);
@@ -5228,6 +5297,28 @@ impl Reedline {
         self
     }
 
+    /// Sets how long a half-typed multi-key sequence waits for its next key
+    /// before the pending prefix is flushed (default: 500ms).
+    ///
+    /// This matches readline's `keyseq-timeout`. When the timeout expires the
+    /// mode resolves the pending keys through its fallback: emacs and vi
+    /// insert self-insert the characters, vi normal replays its keybinding
+    /// table. A value of [`Duration::ZERO`] flushes on the next poll without
+    /// waiting.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use reedline::Reedline;
+    ///
+    /// let editor = Reedline::create()
+    ///     .with_keyseq_timeout(Duration::from_millis(250));
+    /// ```
+    pub fn with_keyseq_timeout(mut self, timeout: Duration) -> Self {
+        self.keyseq_timeout = timeout;
+        self
+    }
+
     /// Sets an idle callback that is called periodically while waiting for user input.
     ///
     /// This is useful for applications that need to process external events
@@ -5497,6 +5588,126 @@ mod tests {
         )]));
         // An empty batch is not complete either.
         assert!(!Reedline::line_input_completed(&[]));
+    }
+
+    // --- multi-key sequence timeout ---
+
+    fn chord_combo(c: char) -> crate::KeyCombination {
+        crate::KeyCombination {
+            modifier: KeyModifiers::NONE,
+            key_code: KeyCode::Char(c),
+        }
+    }
+
+    fn emacs_with_sequence(keys: &[crate::KeyCombination], event: ReedlineEvent) -> Reedline {
+        let mut keybindings = crate::default_emacs_keybindings();
+        keybindings.add_binding_sequence(keys, event);
+        seam_engine(Box::new(crate::Emacs::new(keybindings)))
+    }
+
+    fn vi_insert_with_sequence(keys: &[crate::KeyCombination], event: ReedlineEvent) -> Reedline {
+        let mut insert = crate::default_vi_insert_keybindings();
+        insert.add_binding_sequence(keys, event);
+        seam_engine(Box::new(crate::Vi::new(
+            insert,
+            crate::default_vi_normal_keybindings(),
+            crate::default_vi_visual_keybindings(),
+        )))
+    }
+
+    /// Let the pending sequence's deadline pass and flush it, as the read loop
+    /// does when its poll times out.
+    fn expire_pending_sequence(rl: &mut Reedline) {
+        assert!(
+            rl.edit_mode.has_pending_sequence(),
+            "setup: sequence pending"
+        );
+        rl.keyseq_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert!(rl
+            .keyseq_remaining()
+            .is_some_and(|remaining| remaining.is_zero()));
+        let prompt = DefaultPrompt::default();
+        let _ = rl
+            .flush_pending_keyseq(&prompt)
+            .expect("flush should succeed");
+    }
+
+    #[test]
+    fn keyseq_timeout_defaults_to_500ms_and_is_configurable() {
+        let rl = Reedline::create();
+        assert_eq!(rl.keyseq_timeout, Duration::from_millis(500));
+
+        let rl = Reedline::create().with_keyseq_timeout(Duration::from_millis(42));
+        assert_eq!(rl.keyseq_timeout, Duration::from_millis(42));
+    }
+
+    #[test]
+    fn a_new_read_line_drops_a_pending_sequence() {
+        let mut rl = emacs_with_sequence(&[chord_combo('j'), chord_combo('j')], ReedlineEvent::Esc);
+
+        drive(&mut rl, &[ch('j')]);
+        assert!(rl.edit_mode.has_pending_sequence());
+
+        rl.begin_read();
+        assert!(!rl.edit_mode.has_pending_sequence());
+    }
+
+    #[test]
+    fn a_complete_chord_runs_through_the_engine() {
+        let mut rl = emacs_with_sequence(
+            &[chord_combo('j'), chord_combo('j')],
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar('X')]),
+        );
+
+        drive(&mut rl, &[ch('j')]);
+        assert_eq!(rl.editor.get_buffer(), "", "the prefix must wait");
+        drive(&mut rl, &[ch('j')]);
+
+        assert_eq!(rl.editor.get_buffer(), "X");
+    }
+
+    #[test]
+    fn an_expired_emacs_chord_self_inserts_its_prefix() {
+        let mut rl = emacs_with_sequence(&[chord_combo('j'), chord_combo('j')], ReedlineEvent::Esc);
+
+        drive(&mut rl, &[ch('j')]);
+        assert_eq!(rl.editor.get_buffer(), "");
+        expire_pending_sequence(&mut rl);
+
+        assert_eq!(rl.editor.get_buffer(), "j");
+    }
+
+    #[test]
+    fn an_expired_vi_insert_chord_self_inserts_its_prefix() {
+        let mut rl =
+            vi_insert_with_sequence(&[chord_combo('j'), chord_combo('j')], ReedlineEvent::Esc);
+
+        drive(&mut rl, &[ch('j')]);
+        assert_eq!(rl.editor.get_buffer(), "");
+        expire_pending_sequence(&mut rl);
+
+        assert_eq!(rl.editor.get_buffer(), "j");
+    }
+
+    #[test]
+    fn an_expired_chord_uses_the_shorter_binding() {
+        let mut keybindings = crate::default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Char('j'),
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar('J')]),
+        );
+        keybindings.add_binding_sequence(
+            &[chord_combo('j'), chord_combo('j')],
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar('X')]),
+        );
+        let mut rl = seam_engine(Box::new(crate::Emacs::new(keybindings)));
+
+        drive(&mut rl, &[ch('j')]);
+        assert_eq!(rl.editor.get_buffer(), "", "the binding is a prefix");
+        expire_pending_sequence(&mut rl);
+
+        assert_eq!(rl.editor.get_buffer(), "J");
     }
 
     #[test]
@@ -6462,14 +6673,15 @@ mod tests {
             ]),
         ));
         let prompt = DefaultPrompt::default();
-        rl.process_input_batch(
-            &prompt,
-            vec![Event::Key(KeyEvent::new(
-                KeyCode::Char('x'),
-                KeyModifiers::CONTROL,
-            ))],
-        )
-        .expect("trigger batch ok");
+        let _ = rl
+            .process_input_batch(
+                &prompt,
+                vec![Event::Key(KeyEvent::new(
+                    KeyCode::Char('x'),
+                    KeyModifiers::CONTROL,
+                ))],
+            )
+            .expect("trigger batch ok");
         match rl
             .process_input_batch(&prompt, vec![])
             .expect("replay batch ok")
