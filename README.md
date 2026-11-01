@@ -1,16 +1,42 @@
-# A feature-rich line editor - powering Nushell
+# ruline — a GNU readline-compatible line editor
 
-![GitHub](https://img.shields.io/github/license/nushell/reedline)
-[![Crates.io](https://img.shields.io/crates/v/reedline)](https://crates.io/crates/reedline)
-[![docs.rs](https://img.shields.io/docsrs/reedline)](https://docs.rs/reedline/)
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/nushell/reedline/ci.yml?branch=main)
-[![codecov](https://codecov.io/gh/nushell/reedline/graph/badge.svg?token=NUTC465WOL)](https://codecov.io/gh/nushell/reedline)
-[![Discord](https://img.shields.io/discord/601130461678272522.svg?logo=discord)](https://discord.gg/NtAbbGn)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+![CI](https://github.com/unixwin/ruline/actions/workflows/ci.yml/badge.svg?branch=main)
 
-## Introduction
+## What ruline is
 
-Reedline is a project to create a line editor (like bash's `readline` or zsh's `zle`) that supports many of the modern conveniences of CLIs, including syntax highlighting, completions, multiline support, Unicode support, and more.
-It is currently primarily developed as the interactive editor for [nushell](https://github.com/nushell/nushell) (starting with `v0.60`) striving to provide a pleasant interactive experience.
+ruline is an independent line editor. It is **not a fork** of any other
+project and does not track an upstream: the code base started from
+[nushell/reedline](https://github.com/nushell/reedline) 0.52.1 (MIT), and
+everything since is ours.
+
+The product target is GNU readline 8.x compatibility, for two audiences:
+
+- **niubash**, the shell that embeds ruline as its interactive editor;
+- **C readline consumers** — bash loadable builtins, completion scripts and
+  plugins that expect the `rl_*` / `history_*` ABI, hooks, keymaps, funmap
+  names and inputrc behaviour.
+
+The ABI work is tracked in
+[unixwin/ruline#8](https://github.com/unixwin/ruline/issues/8). The GNU source
+vendored in `unixwin/rubash` (`third_party/bash/lib/readline`, bash 5.3.20) is
+the behavioural oracle: where ruline and GNU disagree, GNU wins.
+
+What stays ruline-specific is additive: syntax highlighting, completion
+menus, history hints, multiline editing and the other modern conveniences.
+Those extras never change ABI-visible state or the bytes a plugin sees.
+
+## Relationship to reedline
+
+- The initial code base is reedline 0.52.1, MIT licensed. The original
+  copyright notice is retained in full in [`LICENSE`](./LICENSE); the history
+  and attribution are recorded in [`UPSTREAM.md`](./UPSTREAM.md).
+- ruline is an independent project. We do not merge nushell/reedline, do not
+  send fixes upstream as a matter of course, and do not follow its edition,
+  feature or API policy.
+- The crate is still published under the package name `reedline` while the
+  ABI transition is in flight, so existing source keeps compiling. The
+  product name is **ruline**; the crate rename is tracked separately.
 
 ## Outline
 
@@ -25,13 +51,13 @@ It is currently primarily developed as the interactive editor for [nushell](http
   - [Use custom `EditMode`](#use-custom-editmode)
 - [Default keybindings](./KEYBINDINGS.md)
 - [Crate features](#crate-features)
-- [Are we prompt yet? (Development status)](#are-we-prompt-yet-development-status)
+- [Status and roadmap](#status-and-roadmap)
 - [Contributing](./CONTRIBUTING.md)
 - [Alternatives](#alternatives)
 
 ## Examples
 
-For the full documentation visit <https://docs.rs/reedline>. The examples should highlight how you enable the most important features or which traits can be implemented for language-specific behavior.
+The examples show the main extension points. The Rust API is still imported as `reedline` while the crate rename is pending; the product is ruline.
 
 ### Basic example
 
@@ -222,41 +248,42 @@ history and menus.
 
 ## Crate features
 
-- `clipboard`: Enable support to use the `SystemClipboard`. Enabling this feature will return a `SystemClipboard` instead of a local clipboard when calling `get_default_clipboard()`.
-- `bashisms`: Enable support for special text sequences that recall components from the history. e.g. `!!` and `!$`. For use in shells like `bash` or [`nushell`](https://nushell.sh).
-- `sqlite`: Provides the `SqliteBackedHistory` to store richer information in the history. Statically links the required sqlite version.
-- `sqlite-dynlib`: Alternative to the feature `sqlite`. Will not statically link. Requires `sqlite >= 3.38` to link dynamically!
-- `external_printer`: No-op, kept for compatibility. `ExternalPrinter` is always available.
+- `clipboard`: use the system clipboard instead of the local clipboard.
+- `bashisms`: support for history recall sequences such as `!!` and `!$`.
+- `external_printer`: no-op, kept for source compatibility; `ExternalPrinter`
+  is always available.
+- `system_clipboard`: enable the `arboard`-backed clipboard backend.
 
-## Are we prompt yet? (Development status)
+The sqlite history backends are gone: ruline ships `FileBackedHistory` only.
 
-Reedline has now all the basic features to become the primary line editor for [nushell](https://github.com/nushell/nushell
-)
+## Status and roadmap
 
-- General editing functionality, that should feel familiar coming from other shells (e.g. bash, fish, zsh).
-- Configurable keybindings (emacs-style bindings and basic vi-style).
-- Configurable prompt
-- Content-aware syntax highlighting.
-- Autocompletion (With graphical selection menu or simple cycling inline).
-- History with interactive search options (optionally persists to file, can support multiple sessions accessing the same file)
-- Fish-style history autosuggestion hints
-- Undo support.
-- Clipboard integration
-- Line completeness validation for seamless entry of multiline command sequences.
-- Visual selection
+ruline already provides the modern editing surface:
 
-### Areas for future improvements
+- emacs and vi editing modes, configurable keybindings, chords and macros;
+- configurable prompts, syntax highlighting, completion menus;
+- file-backed history with interactive, incremental and non-incremental
+  search;
+- fish-style history hints, undo, selection, clipboard integration;
+- multiline validation and Unicode-aware editing.
 
-- [ ] Support for Unicode beyond simple left-to-right scripts
-- [ ] Easier keybinding configuration
-- [ ] Support for more advanced vi commands
-- [ ] Smooth experience if completion or prompt content takes long to compute
-- [ ] Support for a concurrent output stream from background tasks to be displayed, while the input prompt is active. ("Full duplex" mode)
+The GNU readline compatibility work is the current focus:
 
-For more ideas check out the [feature discussion](https://github.com/nushell/reedline/issues/63) or hop on the `#reedline` channel of the [nushell discord](https://discordapp.com/invite/NtAbbGn).
+- [ ] C ABI package (`libreadline.so.8`, clean-room headers, symbol audit) —
+  [#3](https://github.com/unixwin/ruline/issues/3)
+- [ ] core state, `readline()`, callbacks and history — [#2](https://github.com/unixwin/ruline/issues/2)
+- [ ] keymap/funmap/bind/inputrc — [#4](https://github.com/unixwin/ruline/issues/4)
+- [ ] completion API and hooks — [#6](https://github.com/unixwin/ruline/issues/6)
+- [ ] plugin acceptance (`enable -f`, ble.sh, fzf, bash-completion) — [#7](https://github.com/unixwin/ruline/issues/7)
+- [ ] keybinding parity burn-down — [#5](https://github.com/unixwin/ruline/issues/5)
+- [ ] niubash in-process integration — [unixwin/niubash#775](https://github.com/unixwin/niubash/issues/775)
+
+Non-goals: byte-identical internals of GNU readline, zsh/zle plugin support,
+and sharing ABI state with a separately linked `libreadline` instance.
 
 ### Alternatives
 
-For currently more mature Rust line editing check out:
-
-- [rustyline](https://crates.io/crates/rustyline)
+- [GNU readline](https://tiswww.case.edu/php/chet/readline/rltop.html) — the
+  compatibility target.
+- [rustyline](https://crates.io/crates/rustyline) — another mature Rust line
+  editor.

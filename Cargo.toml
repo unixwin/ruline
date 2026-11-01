@@ -1,10 +1,16 @@
 [package]
-authors = ["The Nushell Project Developers"]
-description = "A readline-like crate for CLI text input"
+authors = ["The ruline contributors", "The Nushell Project Developers"]
+description = "A GNU readline-compatible line editor for niubash"
 edition = "2021"
 license = "MIT"
+# The package keeps the `reedline` name so the public Rust API and the
+# niubash `[patch.crates-io]` entry stay source-compatible during the
+# ruline transition. The product is ruline; the crate rename is tracked
+# separately (unixwin/ruline#8 follow-up).
 name = "reedline"
-repository = "https://github.com/nushell/reedline"
+repository = "https://github.com/unixwin/ruline"
+homepage = "https://github.com/unixwin/ruline"
+readme = "README.md"
 rust-version = "1.95.0"
 version = "0.52.1"
 

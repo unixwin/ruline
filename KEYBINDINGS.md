@@ -1,7 +1,7 @@
 # Default keybindings
 
-Reedline ships three edit modes: Emacs, Vi and Helix. Each is built from a
-shared pool of bindings plus its own additions. Applications embedding reedline
+ruline ships three edit modes: Emacs, Vi and Helix. Each is built from a
+shared pool of bindings plus its own additions. Applications embedding ruline
 can add, replace or remove any of them through `Keybindings`; what follows are
 the defaults.
 
