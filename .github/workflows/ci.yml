@@ -69,6 +69,38 @@ jobs:
       - name: Doctests
         run: cargo test --doc ${{ matrix.flags }}
 
+  # Exercises the GNU readline-compatible C surface: build the cdylib, compile
+  # the C smoke test against -lreadline, run it, audit exported symbols, and
+  # assert the ELF SONAME.
+  readline-abi:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (readline-abi)
+        run: cargo clippy -p readline-abi --all-targets -- -D warnings
+
+      - name: Tests (readline-abi)
+        run: cargo test -p readline-abi
+
+      - name: Build cdylib
+        run: cargo build -p readline-abi
+
+      - name: C ABI smoke test and symbol audit
+        run: readline-abi/scripts/smoke.sh debug
+
+      - name: Check SONAME
+        run: readelf -d target/debug/libreadline.so | grep -F 'libreadline.so.8'
+
   # Guards the `rust-version` claim in Cargo.toml, compiling the library as a
   # consumer on the MSRV would. Kept as a CI job instead of a rust-toolchain.toml
   # on purpose; everything else floats on stable.
