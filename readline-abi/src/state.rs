@@ -97,6 +97,7 @@ scalar_accessors!(
     std::os::raw::c_ulong
 );
 scalar_accessors!(insert_mode, set_insert_mode, rl_insert_mode, c_int);
+scalar_accessors!(echoing, set_echoing, rl_echoing_p, c_int);
 scalar_accessors!(
     key_sequence_length,
     set_key_sequence_length,

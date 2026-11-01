@@ -69,6 +69,9 @@ typedef int rl_icppfunc_t(char **);
 typedef char *rl_cpvfunc_t(void);
 typedef void rl_voidfunc_t(void);
 typedef void rl_vintfunc_t(int);
+/* Callback-mode line handler: called with the completed line, or NULL for
+ * EOF and interrupts. */
+typedef void rl_vcpfunc_t(char *);
 
 /* Values passed to rl_filename_quoting_function as the match kind. */
 #define NO_MATCH 0
@@ -218,6 +221,36 @@ extern int rl_clear_message(void);
 extern int rl_clear_visible_line(void);
 extern void rl_free_line_state(void);
 extern int rl_reset_line_state(void);
+
+/* Callback mode.  Install prepares the terminal and prints the prompt; each
+ * rl_callback_read_char consumes one available key.  A completed line is
+ * delivered to the handler (NULL for EOF and interrupts); reinstall replaces
+ * the handler and starts a new line, remove restores the terminal. */
+extern void rl_callback_handler_install(const char *, rl_vcpfunc_t *);
+extern void rl_callback_handler_remove(void);
+extern void rl_callback_read_char(void);
+extern void rl_callback_sigcleanup(void);
+
+/* Terminal preparation.  The application can redirect these through
+ * rl_prep_term_function / rl_deprep_term_function. */
+extern void rl_prep_terminal(int);
+extern void rl_deprep_terminal(void);
+
+/* Cached screen dimensions, filled from the terminal (or COLUMNS/LINES and
+ * the 80x24 default) and refreshed on SIGWINCH. */
+extern void rl_get_screen_size(int *, int *);
+extern void rl_set_screen_size(int, int);
+extern void rl_reset_screen_size(void);
+
+/* Signal handling.  These install/restore the library's SIGINT and SIGWINCH
+ * dispositions; cleanup also leaves terminal mode and drops pending input. */
+extern int rl_set_signals(void);
+extern int rl_clear_signals(void);
+extern void rl_cleanup_after_signal(void);
+extern void rl_reset_after_signal(void);
+
+/* Drop a key queued through rl_pending_input. */
+extern int rl_clear_pending_input(void);
 
 /* Input timing.  Returns the previous timeout in microseconds. */
 extern int rl_set_keyboard_input_timeout(int);

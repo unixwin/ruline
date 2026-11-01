@@ -13,6 +13,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <assert.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -171,6 +172,362 @@ static void display_hook(char **matches, int count, int max) {
 static int redisplay_calls;
 
 static void redisplay_hook(void) { redisplay_calls++; }
+
+/* --- Callback / terminal / signal fixtures ------------------------------- */
+
+static const unsigned char *stream_data;
+static size_t stream_length;
+static size_t stream_position;
+
+static void feed_stream(const void *data, size_t length) {
+    stream_data = (const unsigned char *)data;
+    stream_length = length;
+    stream_position = 0;
+}
+
+static int stream_getc(FILE *stream) {
+    (void)stream;
+    if (stream_position < stream_length) {
+        return stream_data[stream_position++];
+    }
+    return EOF;
+}
+
+static char callback_line[256];
+static int callback_calls;
+static int callback_last_null;
+static int callback_last_done;
+static int callback_last_eof;
+
+static void reset_callback_records(void) {
+    callback_line[0] = '\0';
+    callback_calls = 0;
+    callback_last_null = -1;
+    callback_last_done = -1;
+    callback_last_eof = -1;
+}
+
+static void callback_handler(char *line) {
+    callback_calls++;
+    callback_last_null = (line == NULL);
+    if (line != NULL) {
+        snprintf(callback_line, sizeof(callback_line), "%s", line);
+        free(line);
+    } else {
+        callback_line[0] = '\0';
+    }
+    callback_last_done = rl_done;
+    callback_last_eof = (rl_readline_state & RL_STATE_EOF) != 0;
+}
+
+static int callback_redisplay_calls;
+static int prep_hook_calls;
+static int deprep_hook_calls;
+
+static void callback_redisplay(void) { callback_redisplay_calls++; }
+static void callback_prep_hook(int meta) {
+    (void)meta;
+    prep_hook_calls++;
+}
+static void callback_deprep_hook(void) { deprep_hook_calls++; }
+
+static int event_hook_calls;
+static int available_after;
+
+static int event_counter(void) {
+    event_hook_calls++;
+    return 0;
+}
+
+static int availability_check(void) {
+    return event_hook_calls >= available_after;
+}
+
+static int probe_calls;
+static int probe_saw_dispatching;
+static int probe_last_func_matches;
+static int probe_key;
+
+static int probe_command(int count, int key) {
+    probe_calls++;
+    probe_key = key;
+    probe_saw_dispatching = (rl_readline_state & RL_STATE_DISPATCHING) != 0;
+    probe_last_func_matches = (rl_last_func == probe_command);
+    (void)count;
+    return 0;
+}
+
+static int app_sigint_calls;
+static int app_sigint_saw_sighandler;
+
+static void app_sigint_handler(int signal) {
+    (void)signal;
+    app_sigint_calls++;
+    app_sigint_saw_sighandler = (rl_readline_state & RL_STATE_SIGHANDLER) != 0;
+}
+
+static void step_callback(void) { rl_callback_read_char(); }
+
+static int test_terminal_and_screen_state(void) {
+    int rows = 0;
+    int columns = 0;
+    int pinned_rows = 0;
+    int pinned_columns = 0;
+    int is_tty;
+
+    CHECK(rl_initialize() == 0);
+
+    rl_get_screen_size(&rows, &columns);
+    CHECK(rows > 0);
+    CHECK(columns > 0);
+
+    rl_set_screen_size(41, 123);
+    rl_get_screen_size(&pinned_rows, &pinned_columns);
+    CHECK(pinned_rows == 41);
+    CHECK(pinned_columns == 123);
+    rl_reset_screen_size();
+    rl_get_screen_size(&pinned_rows, &pinned_columns);
+    CHECK(pinned_rows > 0);
+    CHECK(pinned_columns > 0);
+
+    is_tty = isatty(STDIN_FILENO);
+    rl_prep_terminal(0);
+    rl_prep_terminal(0); /* idempotent */
+    CHECK(((rl_readline_state & RL_STATE_TERMPREPPED) != 0) == (is_tty != 0));
+    if (!is_tty) {
+        CHECK(rl_echoing_p == 1);
+    }
+
+    rl_deprep_terminal();
+    rl_deprep_terminal(); /* idempotent */
+    CHECK((rl_readline_state & RL_STATE_TERMPREPPED) == 0);
+
+    rl_pending_input = 'q';
+    RL_SETSTATE(RL_STATE_INPUTPENDING);
+    CHECK(rl_clear_pending_input() == 0);
+    CHECK(rl_pending_input == 0);
+    CHECK((rl_readline_state & RL_STATE_INPUTPENDING) == 0);
+    return 0;
+}
+
+static int test_callback_stream(void) {
+    rl_getc_func_t *saved_getc = rl_getc_function;
+    rl_voidfunc_t *saved_redisplay = rl_redisplay_function;
+    rl_vintfunc_t *saved_prep = rl_prep_term_function;
+    rl_voidfunc_t *saved_deprep = rl_deprep_term_function;
+    int i;
+
+    rl_initialize();
+    prep_hook_calls = 0;
+    deprep_hook_calls = 0;
+    callback_redisplay_calls = 0;
+    rl_getc_function = stream_getc;
+    rl_redisplay_function = callback_redisplay;
+    rl_prep_term_function = callback_prep_hook;
+    rl_deprep_term_function = callback_deprep_hook;
+
+    reset_callback_records();
+    feed_stream("helX\x7flo\n", 8);
+    rl_callback_handler_install("> ", callback_handler);
+    CHECK((rl_readline_state & RL_STATE_CALLBACK) != 0);
+    CHECK(prep_hook_calls == 1);
+    CHECK(callback_redisplay_calls >= 1);
+
+    rl_callback_sigcleanup(); /* no transient state: must be harmless */
+
+    for (i = 0; i < 8; i++) {
+        step_callback();
+    }
+
+    CHECK(callback_calls == 1);
+    CHECK(callback_last_null == 0);
+    CHECK(strcmp(callback_line, "hello") == 0);
+    CHECK(callback_last_done != 0);
+    CHECK(callback_last_eof == 0);
+    CHECK(rl_line_buffer[0] == '\0');
+    CHECK(rl_done == 0);
+    CHECK(rl_point == 0);
+    CHECK(rl_end == 0);
+    CHECK((rl_readline_state & RL_STATE_CALLBACK) != 0);
+    CHECK(prep_hook_calls == 2);
+    CHECK(deprep_hook_calls == 1);
+
+    /* Reinstall replaces the handler without re-prepping the terminal. */
+    reset_callback_records();
+    rl_callback_handler_install("$ ", callback_handler);
+    CHECK(prep_hook_calls == 2);
+    feed_stream("z\n", 2);
+    step_callback();
+    step_callback();
+    CHECK(callback_calls == 1);
+    CHECK(strcmp(callback_line, "z") == 0);
+
+    /* Ctrl-C aborts: NULL line, not EOF. */
+    reset_callback_records();
+    feed_stream("\003", 1);
+    step_callback();
+    CHECK(callback_calls == 1);
+    CHECK(callback_last_null != 0);
+    CHECK(callback_last_eof == 0);
+    CHECK(rl_line_buffer[0] == '\0');
+
+    /* Ctrl-D on an empty line is EOF. */
+    reset_callback_records();
+    feed_stream("\004", 1);
+    step_callback();
+    CHECK(callback_calls == 1);
+    CHECK(callback_last_null != 0);
+    CHECK(callback_last_eof != 0);
+
+    /* Ctrl-D on a non-empty line runs delete-char instead of EOF. */
+    reset_callback_records();
+    feed_stream("abc\004\004\n", 6);
+    for (i = 0; i < 6; i++) {
+        step_callback();
+    }
+    CHECK(callback_calls == 1);
+    CHECK(callback_last_null == 0);
+    CHECK(strcmp(callback_line, "abc") == 0);
+
+    /* rl_pending_input is replayed before the stream. */
+    reset_callback_records();
+    rl_pending_input = 'x';
+    RL_SETSTATE(RL_STATE_INPUTPENDING);
+    step_callback();
+    CHECK(strcmp(rl_line_buffer, "x") == 0);
+    CHECK(rl_pending_input == 0);
+    CHECK((rl_readline_state & RL_STATE_INPUTPENDING) == 0);
+    feed_stream("\n", 1);
+    step_callback();
+    CHECK(callback_calls == 1);
+    CHECK(strcmp(callback_line, "x") == 0);
+
+    /* Pending EOF completes the fresh line as EOF. */
+    reset_callback_records();
+    rl_pending_input = EOF;
+    step_callback();
+    CHECK(callback_calls == 1);
+    CHECK(callback_last_null != 0);
+    CHECK(callback_last_eof != 0);
+
+    /* Event hook polls availability before reading a byte. */
+    reset_callback_records();
+    event_hook_calls = 0;
+    available_after = 2;
+    rl_event_hook = event_counter;
+    rl_input_available_hook = availability_check;
+    feed_stream("e\n", 2);
+    step_callback();
+    CHECK(event_hook_calls == 2);
+    CHECK(strcmp(rl_line_buffer, "e") == 0);
+    step_callback();
+    CHECK(event_hook_calls == 2);
+    CHECK(callback_calls == 1);
+    CHECK(strcmp(callback_line, "e") == 0);
+    rl_event_hook = NULL;
+    rl_input_available_hook = NULL;
+
+    /* A real command binding is dispatched with the dispatching state bit. */
+    reset_callback_records();
+    probe_calls = 0;
+    probe_saw_dispatching = 0;
+    probe_last_func_matches = 0;
+    CHECK(rl_bind_key('!', probe_command) == 0);
+    feed_stream("!\n", 2);
+    step_callback();
+    step_callback();
+    CHECK(probe_calls == 1);
+    CHECK(probe_key == '!');
+    CHECK(probe_saw_dispatching != 0);
+    CHECK(probe_last_func_matches != 0);
+    CHECK(callback_calls == 1);
+    CHECK(strcmp(callback_line, "") == 0);
+    rl_bind_key('!', rl_named_function("self-insert"));
+
+    rl_callback_handler_remove();
+    CHECK((rl_readline_state & RL_STATE_CALLBACK) == 0);
+    CHECK(prep_hook_calls == deprep_hook_calls);
+    rl_callback_handler_remove(); /* idempotent */
+    CHECK(prep_hook_calls == deprep_hook_calls);
+
+    rl_getc_function = saved_getc;
+    rl_redisplay_function = saved_redisplay;
+    rl_prep_term_function = saved_prep;
+    rl_deprep_term_function = saved_deprep;
+    return 0;
+}
+
+static int test_callback_signals(void) {
+    struct sigaction action;
+    struct sigaction previous;
+    rl_getc_func_t *saved_getc = rl_getc_function;
+    rl_voidfunc_t *saved_redisplay = rl_redisplay_function;
+    rl_vintfunc_t *saved_prep = rl_prep_term_function;
+    rl_voidfunc_t *saved_deprep = rl_deprep_term_function;
+
+    rl_initialize();
+    prep_hook_calls = 0;
+    deprep_hook_calls = 0;
+    callback_redisplay_calls = 0;
+    rl_getc_function = stream_getc;
+    rl_redisplay_function = callback_redisplay;
+    rl_prep_term_function = callback_prep_hook;
+    rl_deprep_term_function = callback_deprep_hook;
+
+    reset_callback_records();
+    feed_stream("", 0);
+    rl_callback_handler_install("> ", callback_handler);
+
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = app_sigint_handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    CHECK(sigaction(SIGINT, &action, &previous) == 0);
+
+    app_sigint_calls = 0;
+    app_sigint_saw_sighandler = 0;
+    CHECK(rl_set_signals() == 0);
+    CHECK(raise(SIGINT) == 0);
+    step_callback();
+
+    CHECK(app_sigint_calls == 1);
+    CHECK(app_sigint_saw_sighandler != 0);
+    CHECK(callback_calls == 1);
+    CHECK(callback_last_null != 0);
+    CHECK(callback_last_eof == 0);
+    CHECK((rl_readline_state & RL_STATE_SIGHANDLER) == 0);
+    CHECK((rl_readline_state & RL_STATE_CALLBACK) != 0);
+
+    /* SIGWINCH refreshes the size and repaints before consuming a key. */
+    callback_redisplay_calls = 0;
+    CHECK(rl_set_signals() == 0);
+    CHECK(raise(SIGWINCH) == 0);
+    rl_pending_input = 'w';
+    step_callback();
+    CHECK(callback_redisplay_calls >= 1);
+    CHECK(strcmp(rl_line_buffer, "w") == 0);
+
+    feed_stream("\n", 1);
+    step_callback();
+    CHECK(callback_calls == 2);
+    CHECK(strcmp(callback_line, "w") == 0);
+
+    /* GNU cleanup/reset order, also covered directly. */
+    rl_cleanup_after_signal();
+    rl_reset_after_signal();
+    CHECK((rl_readline_state & RL_STATE_TERMPREPPED) == 0);
+    rl_clear_signals();
+    CHECK(sigaction(SIGINT, &previous, NULL) == 0);
+
+    rl_callback_handler_remove();
+    CHECK(prep_hook_calls == deprep_hook_calls);
+
+    rl_getc_function = saved_getc;
+    rl_redisplay_function = saved_redisplay;
+    rl_prep_term_function = saved_prep;
+    rl_deprep_term_function = saved_deprep;
+    return 0;
+}
 
 static int test_state_and_text(void) {
     CHECK(rl_readline_version == RL_READLINE_VERSION);
@@ -803,6 +1160,15 @@ int main(void) {
         return 1;
     }
     if (test_history() != 0) {
+        return 1;
+    }
+    if (test_terminal_and_screen_state() != 0) {
+        return 1;
+    }
+    if (test_callback_stream() != 0) {
+        return 1;
+    }
+    if (test_callback_signals() != 0) {
         return 1;
     }
     puts("readline ABI smoke test: OK");
