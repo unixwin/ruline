@@ -307,6 +307,166 @@ int main(void) {
     integer("history.stifled.length", history_length);
     unstifle_history();
 
+    section("history-abi");
+    clear_history();
+    add_history("one");
+    add_history("two");
+    add_history("three");
+    using_history();
+    {
+        HIST_ENTRY **list = history_list();
+        integer("list.length", history_length);
+        value("list.0", list != NULL ? list[0]->line : NULL);
+        value("list.1", list != NULL ? list[1]->line : NULL);
+        value("list.2", list != NULL ? list[2]->line : NULL);
+        integer("list.null_terminated", list != NULL && list[3] == NULL);
+
+        HISTORY_STATE *state = history_get_history_state();
+        integer("state.offset", state->offset);
+        integer("state.length", state->length);
+        integer("state.flags", state->flags);
+        integer("state.entries_match", state->entries == list);
+        state->offset = 1;
+        history_set_history_state(state);
+        integer("state.set.offset", where_history());
+        free(state);
+
+        HIST_ENTRY *removed = remove_history(1);
+        value("remove.line", removed != NULL ? removed->line : NULL);
+        integer("remove.length", history_length);
+        value("remove.list0", history_list() != NULL ? history_list()[0]->line : NULL);
+        value("remove.list1", history_list() != NULL ? history_list()[1]->line : NULL);
+        free_history_entry(removed);
+
+        HIST_ENTRY *old = replace_history_entry(1, "THREE", (histdata_t)0);
+        value("replace.old", old != NULL ? old->line : NULL);
+        value("replace.new", history_list() != NULL ? history_list()[1]->line : NULL);
+        integer("replace.length", history_length);
+        free_history_entry(old);
+    }
+    {
+        HIST_ENTRY *allocated = alloc_history_entry("allocated", strdup("#123"));
+        HIST_ENTRY *copy = copy_history_entry(allocated);
+        value("alloc.line", allocated != NULL ? allocated->line : NULL);
+        value("alloc.timestamp", allocated != NULL ? allocated->timestamp : NULL);
+        integer("alloc.distinct_line", allocated != NULL && copy != NULL && allocated->line != copy->line);
+        history_comment_char = '#';
+        integer("alloc.time", allocated != NULL ? (int)history_get_time(allocated) : -1);
+        history_comment_char = 0;
+        free_history_entry(copy);
+        free_history_entry(allocated);
+    }
+    {
+        HIST_ENTRY **range = remove_history_range(0, 0);
+        value("range.0", range != NULL ? range[0]->line : NULL);
+        integer("range.null_terminated", range != NULL && range[1] == NULL);
+        integer("range.length", history_length);
+        value("range.remaining", history_list() != NULL ? history_list()[0]->line : NULL);
+        if (range != NULL) {
+            free_history_entry(range[0]);
+            free(range);
+        }
+    }
+
+    clear_history();
+    add_history("alpha one");
+    add_history("beta two");
+    add_history("alphabet");
+    add_history("gamma alpha");
+    using_history();
+    integer("search.back", history_search("alpha", -1));
+    integer("search.back.where", where_history());
+    history_set_pos(2);
+    integer("search.back.earlier", history_search("alpha", -1));
+    integer("search.back.earlier.where", where_history());
+    history_set_pos(0);
+    integer("search.forward", history_search("alpha", 1));
+    integer("search.forward.where", where_history());
+    history_set_pos(4);
+    integer("search.prefix.back", history_search_prefix("alpha", -1));
+    integer("search.prefix.where", where_history());
+    integer("search.prefix.miss", history_search_prefix("zzz", -1));
+    integer("search.pos", history_search_pos("alpha", -1, 2));
+    integer("search.pos.restored", where_history());
+
+    clear_history();
+    add_history("first");
+    add_history("second arg");
+    add_history("third thing here");
+    using_history();
+    {
+        static const char *const cases[] = {
+            "echo !!",
+            "echo !2",
+            "echo !-1",
+            "echo !sec",
+            "echo !nosuch",
+            "echo !!:$",
+            "echo !!:*",
+            "echo !!:q",
+            "echo !!:p",
+            "echo !?second?:s/arg/ARG/",
+            "echo '!!' \"!!\"",
+            "echo \\!!",
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            char *output = NULL;
+            int rc = history_expand(cases[i], &output);
+            printf("expand.%zu|rc=%d|%s\n", i, rc, output == NULL ? "<null>" : output);
+            free(output);
+        }
+    }
+    {
+        char *arguments = history_arg_extract(1, 2, "cmd one two three");
+        value("arg.1-2", arguments);
+        free(arguments);
+        arguments = history_arg_extract(0, 0, "cmd one two three");
+        value("arg.0", arguments);
+        free(arguments);
+        arguments = history_arg_extract((int)'$', (int)'$', "cmd one two three");
+        value("arg.last", arguments);
+        free(arguments);
+    }
+    {
+        static const char *const cases[] = {
+            "echo 'a b' \"c d\"",
+            "a\\ b c",
+            "foo|bar;baz",
+            "cmd $(echo hi) end",
+            "x 2>/dev/null",
+            "a&&b||c",
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            char **words = history_tokenize(cases[i]);
+            printf("tokenize.%zu|", i);
+            if (words == NULL) {
+                printf("<null>\n");
+                continue;
+            }
+            for (int word = 0; words[word] != NULL; word++) {
+                printf("[%s]", words[word]);
+                free(words[word]);
+            }
+            printf("\n");
+            free(words);
+        }
+    }
+    {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/conformance-truncate", root_dir);
+        write_file(path, "one\ntwo\nthree\nfour\n");
+        integer("truncate.rc", history_truncate_file(path, 2));
+        FILE *file = fopen(path, "r");
+        if (file != NULL) {
+            char line[128];
+            while (fgets(line, sizeof(line), file) != NULL) {
+                printf("truncate.line|%s", line);
+            }
+            fclose(file);
+        }
+        unlink(path);
+    }
+
     section("completion");
     {
         char **matches = rl_completion_matches("al", generator);

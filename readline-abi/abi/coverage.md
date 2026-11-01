@@ -17,9 +17,9 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 | Surface | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: |
-| Functions | 119 | 329 | 36.2% | 210 |
-| Globals | 82 | 110 | 74.5% | 28 |
-| **All** | **201** | **439** | **45.8%** | **238** |
+| Functions | 135 | 329 | 41.0% | 194 |
+| Globals | 83 | 110 | 75.5% | 27 |
+| **All** | **218** | **439** | **49.7%** | **221** |
 
 ## By area
 
@@ -30,7 +30,7 @@ readline-abi/scripts/abi-coverage.py --snapshot
 | keymap | 51/53 | 8/12 | 59 | 65 | 90.8% | 6 |
 | completion | 11/18 | 33/36 | 44 | 54 | 81.5% | 10 |
 | hooks | 0/0 | 8/11 | 8 | 11 | 72.7% | 3 |
-| history | 20/56 | 18/19 | 38 | 75 | 50.7% | 37 |
+| history | 36/56 | 19/19 | 55 | 75 | 73.3% | 20 |
 | callbacks | 4/4 | 0/0 | 4 | 4 | 100.0% | 0 |
 | terminal | 8/22 | 0/0 | 8 | 22 | 36.4% | 14 |
 | display | 10/23 | 0/3 | 10 | 26 | 38.5% | 16 |
@@ -39,7 +39,7 @@ readline-abi/scripts/abi-coverage.py --snapshot
 ## Top missing groups
 
 1. **text** — 133 missing (7/140 implemented)
-2. **history** — 37 missing (38/75 implemented)
+2. **history** — 20 missing (55/75 implemented)
 3. **display** — 16 missing (10/26 implemented)
 4. **terminal** — 14 missing (8/22 implemented)
 5. **state** — 13 missing (18/31 implemented)
@@ -105,18 +105,13 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 `rl_macro_display_hook` `rl_signal_event_hook` `rl_timeout_event_hook`
 
-### history (37)
+### history (20)
 
-`alloc_history_entry` `copy_history_entry` `free_history_entry` `get_history_event`
-`history_arg_extract` `history_expand` `history_get_history_state` `history_inhibit_expansion_function`
-`history_list` `history_search` `history_search_pos` `history_search_prefix`
-`history_set_history_state` `history_tokenize` `remove_history` `remove_history_range`
-`replace_history_entry` `rl_beginning_of_history` `rl_clear_history` `rl_end_of_history`
-`rl_fetch_history` `rl_forward_search_history` `rl_get_next_history` `rl_get_previous_history`
-`rl_history_search_backward` `rl_history_search_forward` `rl_history_substr_search_backward` `rl_history_substr_search_forward`
-`rl_noninc_forward_search` `rl_noninc_forward_search_again` `rl_noninc_reverse_search` `rl_noninc_reverse_search_again`
-`rl_operate_and_get_next` `rl_reverse_search_history` `rl_vi_fetch_history` `rl_vi_search`
-`rl_vi_search_again`
+`rl_beginning_of_history` `rl_clear_history` `rl_end_of_history` `rl_fetch_history`
+`rl_forward_search_history` `rl_get_next_history` `rl_get_previous_history` `rl_history_search_backward`
+`rl_history_search_forward` `rl_history_substr_search_backward` `rl_history_substr_search_forward` `rl_noninc_forward_search`
+`rl_noninc_forward_search_again` `rl_noninc_reverse_search` `rl_noninc_reverse_search_again` `rl_operate_and_get_next`
+`rl_reverse_search_history` `rl_vi_fetch_history` `rl_vi_search` `rl_vi_search_again`
 
 ### terminal (14)
 
@@ -143,6 +138,6 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 ## Audit notes
 
-- Library: `target/debug/libreadline.so` (202 ABI exports).
-- Headers: 202 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
+- Library: `target/debug/libreadline.so` (219 ABI exports).
+- Headers: 219 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
 - The ten legacy compatibility aliases wrapped in `#if 0` in the GNU header are included in the denominator: GNU's `compat.c` still exports them in `libreadline.so.8`.
