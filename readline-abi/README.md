@@ -76,6 +76,36 @@ History: `add_history`, `add_history_time`, `clear_history`, `using_history`,
 `read_history_range`, `write_history`, `append_history`,
 `history_truncate_file`, plus the standard exported history state variables.
 
+Keymaps and funmap: `emacs_standard_keymap`, `emacs_meta_keymap`,
+`emacs_ctlx_keymap`, `vi_insertion_keymap`, `vi_movement_keymap`,
+`rl_get_keymap`, `rl_set_keymap`, `rl_get_keymap_by_name`,
+`rl_get_keymap_name`, `rl_set_keymap_name`, `rl_make_bare_keymap`,
+`rl_make_keymap`, `rl_copy_keymap`, `rl_discard_keymap`, `rl_free_keymap`,
+`rl_empty_keymap`, `rl_add_defun`, `rl_add_funmap_entry`, `rl_funmap_names`,
+`rl_initialize_funmap`, `rl_list_funmap_names`, `rl_named_function`,
+`rl_function_of_keyseq`, `rl_function_of_keyseq_len`, `rl_invoking_keyseqs`,
+`rl_invoking_keyseqs_in_map`.
+
+Binding, variables, and inputrc: `rl_bind_key`, `rl_bind_key_in_map`,
+`rl_bind_key_if_unbound`, `rl_bind_key_if_unbound_in_map`, `rl_bind_keyseq`,
+`rl_bind_keyseq_in_map`, `rl_bind_keyseq_if_unbound`,
+`rl_bind_keyseq_if_unbound_in_map`, `rl_generic_bind`, `rl_macro_bind`,
+`rl_unbind_key`, `rl_unbind_key_in_map`, `rl_unbind_function_in_map`,
+`rl_unbind_command_in_map`, `rl_translate_keyseq`, `rl_untranslate_keyseq`,
+`rl_variable_value`, `rl_variable_bind`, `rl_parse_and_bind`,
+`rl_read_init_file`, `rl_re_read_init_file`, `rl_print_keybinding`,
+`rl_function_dumper`, `rl_macro_dumper`, `rl_variable_dumper`,
+`rl_dump_functions`, `rl_dump_macros`, `rl_dump_variables`.
+
+The default Emacs and vi keymap slots are materialised from the GNU 8.3
+tables.  The public funmap command bodies are inert in this standalone crate
+(they are not exported ABI functions); a host that owns the live editor can
+bind its own functions with `rl_add_defun`.  `rl_dump_*` treat a non-zero
+`count` as the readable flag because the `rl_explicit_arg` global is not yet
+part of this slice.  `$if` supports `term=`, `mode=`, `version`, the
+application name, and boolean/string variable comparisons; `$else`, `$endif`,
+and `$include` are also handled.
+
 Unimplemented GNU entry points are intentionally absent from both the headers
 and the library; the audit rejects any exported `rl_*`/`history_*` symbol that
 is not declared.  There are no silent stubs.
@@ -84,8 +114,12 @@ is not declared.  There are no silent stubs.
 
 - `readline()` runs a fresh ruline `Reedline` per call and does not yet share
   the ABI history store with the editor.
-- Keymaps, bindings, completion, callbacks, signals, kill ring, undo, and
-  history expansion/search are not implemented.
+- Live key dispatch is not routed yet: binding a key does not change niu's
+  editor (tracked by niubash#775).  Completion, callbacks, signals, kill ring,
+  undo, and history expansion/search remain future slices.
+- `rl_push_macro_input`, the keyboard-macro recording commands,
+  `rl_get_termcap`, `rl_change_environment`, and `rl_explicit_arg` are not
+  implemented yet.
 - The history store is an in-process vector; it does not use
   `FileBackedHistory` or persist automatically.
 - Only `libreadline.so.8` packaging exists; a separate `libhistory.so.8`

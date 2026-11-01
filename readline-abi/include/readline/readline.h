@@ -12,6 +12,8 @@
 #ifndef RULINE_READLINE_ABI_READLINE_H
 #define RULINE_READLINE_ABI_READLINE_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -29,6 +31,29 @@ extern "C" {
 
 /* Type of a bindable editing command: (count, key) -> status. */
 typedef int rl_command_func_t(int, int);
+
+/* Keymap layout.  One entry exists for every byte value plus a final
+ * ANYOTHERKEY shadow slot used when a longer sequence does not match. */
+typedef struct _keymap_entry {
+    unsigned char type;
+    rl_command_func_t *function;
+} KEYMAP_ENTRY;
+
+#define KEYMAP_SIZE 257
+#define ANYOTHERKEY (KEYMAP_SIZE - 1)
+
+typedef KEYMAP_ENTRY KEYMAP_ENTRY_ARRAY[KEYMAP_SIZE];
+typedef KEYMAP_ENTRY *Keymap;
+
+#define ISFUNC 0
+#define ISKMAP 1
+#define ISMACR 2
+
+extern KEYMAP_ENTRY_ARRAY emacs_standard_keymap;
+extern KEYMAP_ENTRY_ARRAY emacs_meta_keymap;
+extern KEYMAP_ENTRY_ARRAY emacs_ctlx_keymap;
+extern KEYMAP_ENTRY_ARRAY vi_insertion_keymap;
+extern KEYMAP_ENTRY_ARRAY vi_movement_keymap;
 
 /* Values for the rl_readline_state bit mask. */
 #define RL_STATE_NONE 0x00000000
@@ -91,6 +116,64 @@ extern char *rl_display_prompt;
 extern rl_command_func_t *rl_last_func;
 extern char *rl_executing_keyseq;
 extern int rl_key_sequence_length;
+
+/* Keymap and funmap management. */
+extern Keymap rl_get_keymap(void);
+extern void rl_set_keymap(Keymap);
+extern Keymap rl_get_keymap_by_name(const char *);
+extern char *rl_get_keymap_name(Keymap);
+extern int rl_set_keymap_name(const char *, Keymap);
+extern void rl_set_keymap_from_edit_mode(void);
+extern char *rl_get_keymap_name_from_edit_mode(void);
+extern Keymap rl_make_bare_keymap(void);
+extern Keymap rl_make_keymap(void);
+extern Keymap rl_copy_keymap(Keymap);
+extern void rl_discard_keymap(Keymap);
+extern void rl_free_keymap(Keymap);
+extern int rl_empty_keymap(Keymap);
+
+extern int rl_add_defun(const char *, rl_command_func_t *, int);
+extern int rl_add_funmap_entry(const char *, rl_command_func_t *);
+extern const char **rl_funmap_names(void);
+extern void rl_initialize_funmap(void);
+extern void rl_list_funmap_names(void);
+extern rl_command_func_t *rl_named_function(const char *);
+extern rl_command_func_t *rl_function_of_keyseq(const char *, Keymap, int *);
+extern rl_command_func_t *rl_function_of_keyseq_len(const char *, size_t, Keymap, int *);
+extern char **rl_invoking_keyseqs(rl_command_func_t *);
+extern char **rl_invoking_keyseqs_in_map(rl_command_func_t *, Keymap);
+
+/* Binding and translation. */
+extern int rl_bind_key(int, rl_command_func_t *);
+extern int rl_bind_key_in_map(int, rl_command_func_t *, Keymap);
+extern int rl_bind_key_if_unbound(int, rl_command_func_t *);
+extern int rl_bind_key_if_unbound_in_map(int, rl_command_func_t *, Keymap);
+extern int rl_bind_keyseq(const char *, rl_command_func_t *);
+extern int rl_bind_keyseq_in_map(const char *, rl_command_func_t *, Keymap);
+extern int rl_bind_keyseq_if_unbound(const char *, rl_command_func_t *);
+extern int rl_bind_keyseq_if_unbound_in_map(const char *, rl_command_func_t *, Keymap);
+extern int rl_generic_bind(int, const char *, char *, Keymap);
+extern int rl_macro_bind(const char *, const char *, Keymap);
+extern int rl_unbind_key(int);
+extern int rl_unbind_key_in_map(int, Keymap);
+extern int rl_unbind_function_in_map(rl_command_func_t *, Keymap);
+extern int rl_unbind_command_in_map(const char *, Keymap);
+extern int rl_translate_keyseq(const char *, char *, int *);
+extern char *rl_untranslate_keyseq(int);
+
+/* Variables, inputrc, and dumping. */
+extern char *rl_variable_value(const char *);
+extern int rl_variable_bind(const char *, const char *);
+extern int rl_parse_and_bind(char *);
+extern int rl_read_init_file(const char *);
+extern int rl_re_read_init_file(int, int);
+extern void rl_print_keybinding(const char *, Keymap, int);
+extern void rl_function_dumper(int);
+extern void rl_macro_dumper(int);
+extern void rl_variable_dumper(int);
+extern int rl_dump_functions(int, int);
+extern int rl_dump_macros(int, int);
+extern int rl_dump_variables(int, int);
 
 /* Lifecycle and prompt management. */
 extern int rl_initialize(void);

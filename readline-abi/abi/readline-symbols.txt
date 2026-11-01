@@ -12,8 +12,10 @@ completion_matches
 copy_history_entry
 crlf
 current_history
-defined
 ding
+emacs_ctlx_keymap
+emacs_meta_keymap
+emacs_standard_keymap
 filename_completion_function
 free_history_entry
 free_undo_list
@@ -435,5 +437,7 @@ stifle_history
 unstifle_history
 username_completion_function
 using_history
+vi_insertion_keymap
+vi_movement_keymap
 where_history
 write_history
