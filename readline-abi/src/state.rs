@@ -13,25 +13,6 @@ use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 /// Signature of a readline bindable command.
 pub type RlCommandFunc = Option<unsafe extern "C" fn(c_int, c_int) -> c_int>;
 
-/// GNU `enum undo_code` values.  Undo history is not part of this ABI slice,
-/// but the values are documented here next to the exported `rl_undo_list`
-/// pointer so the layout stays explicit.
-pub const UNDO_DELETE: c_int = 0;
-pub const UNDO_INSERT: c_int = 1;
-pub const UNDO_BEGIN: c_int = 2;
-pub const UNDO_END: c_int = 3;
-
-/// GNU `UNDO_LIST`.  The Rust adapter never dereferences this pointer yet; it
-/// is exported for applications (and `rl_save_state`) that inspect it.
-#[repr(C)]
-pub struct UndoList {
-    pub next: *mut UndoList,
-    pub start: c_int,
-    pub end: c_int,
-    pub text: *mut c_char,
-    pub what: c_int,
-}
-
 const DEFAULT_BUFFER_SIZE: usize = 1024;
 const DEFAULT_KEYBOARD_TIMEOUT: c_int = 100_000;
 
@@ -110,10 +91,6 @@ pub static mut rl_instream: *mut libc::FILE = ptr::null_mut();
 pub static mut rl_outstream: *mut libc::FILE = ptr::null_mut();
 #[no_mangle]
 pub static mut rl_prefer_env_winsize: c_int = 0;
-#[no_mangle]
-pub static mut rl_undo_list: *mut UndoList = ptr::null_mut();
-#[no_mangle]
-pub static mut rl_executing_macro: *mut c_char = ptr::null_mut();
 
 #[cfg(unix)]
 extern "C" {
@@ -228,22 +205,6 @@ pub(crate) fn outstream() -> *mut libc::FILE {
 
 pub(crate) fn set_outstream(value: *mut libc::FILE) {
     unsafe { ptr::addr_of_mut!(rl_outstream).write(value) }
-}
-
-pub(crate) fn executing_macro() -> *mut c_char {
-    unsafe { ptr::addr_of!(rl_executing_macro).read() }
-}
-
-pub(crate) fn set_executing_macro(value: *mut c_char) {
-    unsafe { ptr::addr_of_mut!(rl_executing_macro).write(value) }
-}
-
-pub(crate) fn undo_list() -> *mut UndoList {
-    unsafe { ptr::addr_of!(rl_undo_list).read() }
-}
-
-pub(crate) fn set_undo_list(value: *mut UndoList) {
-    unsafe { ptr::addr_of_mut!(rl_undo_list).write(value) }
 }
 
 /// GNU's `readline_initialize_everything` binds the unset streams to the C
@@ -447,7 +408,7 @@ pub struct ReadlineState {
     pub mark: c_int,
     pub buflen: c_int,
     pub buffer: *mut c_char,
-    pub ul: *mut UndoList,
+    pub ul: *mut crate::undo::UNDO_LIST,
     pub prompt: *mut c_char,
 
     pub rlstate: c_int,
@@ -495,7 +456,7 @@ pub unsafe extern "C" fn rl_save_state(state: *mut ReadlineState) -> c_int {
     destination.mark = mark();
     destination.buflen = line_capacity() as c_int;
     destination.buffer = line_buffer();
-    destination.ul = undo_list();
+    destination.ul = unsafe { ptr::addr_of!(crate::undo::rl_undo_list).read() };
     destination.prompt = prompt();
 
     destination.rlstate = readline_state() as c_int;
@@ -511,7 +472,7 @@ pub unsafe extern "C" fn rl_save_state(state: *mut ReadlineState) -> c_int {
     destination.pendingin = pending_input();
     destination.inf = instream();
     destination.outf = outstream();
-    destination.macro_ = executing_macro();
+    destination.macro_ = unsafe { ptr::addr_of!(crate::macros::rl_executing_macro).read() };
 
     destination.catchsigs = 0;
     destination.catchsigwinch = 0;
@@ -539,7 +500,7 @@ pub unsafe extern "C" fn rl_restore_state(state: *mut ReadlineState) -> c_int {
     set_mark(source.mark);
     set_line_buffer(source.buffer);
     set_line_capacity(source.buflen.max(0) as usize);
-    set_undo_list(source.ul);
+    unsafe { ptr::addr_of_mut!(crate::undo::rl_undo_list).write(source.ul) };
     set_prompt(source.prompt);
 
     set_readline_state(source.rlstate as std::os::raw::c_ulong);
@@ -554,7 +515,7 @@ pub unsafe extern "C" fn rl_restore_state(state: *mut ReadlineState) -> c_int {
     set_instream(source.inf);
     set_outstream(source.outf);
     set_pending_input(source.pendingin);
-    set_executing_macro(source.macro_);
+    unsafe { ptr::addr_of_mut!(crate::macros::rl_executing_macro).write(source.macro_) };
 
     crate::completion::rl_completion_entry_function = source.entryfunc;
     crate::completion::rl_menu_completion_entry_function = source.menuentryfunc;

@@ -315,19 +315,8 @@ extern int rl_next_screen_line(int, int);
 extern void rl_free_line_state(void);
 extern int rl_reset_line_state(void);
 
-/* Undo.  An UNDO_LIST records how to reverse one buffer change; UNDO_DELETE
- * means "re-insert the saved text", UNDO_INSERT means "delete start..end", and
- * BEGIN/END bracket a group that is undone atomically.  The list is attached
- * to history entries through HIST_ENTRY.data. */
-enum undo_code { UNDO_DELETE, UNDO_INSERT, UNDO_BEGIN, UNDO_END };
-
-typedef struct undo_list {
-    struct undo_list *next;
-    int start, end;
-    char *text;
-    enum undo_code what;
-} UNDO_LIST;
-
+/* Undo.  The UNDO_LIST type is declared above, next to the saved-state
+ * layout that embeds it. */
 extern UNDO_LIST *rl_undo_list;
 
 extern void rl_add_undo(enum undo_code, int, int, char *);
