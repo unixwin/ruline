@@ -22,8 +22,8 @@ use std::sync::{Mutex, MutexGuard, Once};
 
 use crate::keymap_defaults::{
     default_command, BindTarget, DEFAULT_FUNMAP, EMACS_CTLX_KEYMAP_BINDINGS,
-    EMACS_META_KEYMAP_BINDINGS, EMACS_STANDARD_KEYMAP_BINDINGS, VI_INSERTION_KEYMAP_BINDINGS,
-    VI_MOVEMENT_KEYMAP_BINDINGS,
+    EMACS_META_KEYMAP_BINDINGS, EMACS_STANDARD_KEYMAP_BINDINGS, TERMINAL_SEQUENCE_BINDINGS,
+    VI_INSERTION_KEYMAP_BINDINGS, VI_MOVEMENT_KEYMAP_BINDINGS,
 };
 use crate::state::{self, RlCommandFunc};
 
@@ -287,6 +287,21 @@ fn ensure_initialized() {
             .iter()
             .map(|(_, value)| value.and_then(|text| CString::new(text).ok()))
             .collect();
+
+        // GNU binds the terminal's Home/End/arrow/Delete/PageUp/PageDown
+        // sequences after the static maps (terminal.c). They are ESC/CSI
+        // chains in the same keymap trie, not extra single-byte slots.
+        for (sequence, name) in TERMINAL_SEQUENCE_BINDINGS {
+            if let Some(function) = named_function_impl(&state, name.as_bytes()) {
+                generic_bind_keys_impl(
+                    &mut state,
+                    ISFUNC as c_int,
+                    sequence,
+                    function_to_ptr(Some(function)) as *mut c_void,
+                    standard_keymap_ptr(),
+                );
+            }
+        }
     });
 }
 
@@ -515,9 +530,20 @@ fn caret_value(byte: u8) -> u8 {
 ///
 /// Supported forms include `\C-x`, `\M-x`, `\e`, `\n`, `\t`, `\xHH`,
 /// `\ooo`, `^?`, backslash quoting, and a surrounding single or double quote.
-fn translate_impl(sequence: &[u8], meta_prefix: bool) -> Result<Vec<u8>, ()> {
+fn translate_impl(
+    sequence: &[u8],
+    meta_prefix: bool,
+    binding_syntax: bool,
+) -> Result<Vec<u8>, ()> {
     let mut input = sequence;
-    if input.len() >= 2 && (input[0] == b'"' || input[0] == b'\'') {
+    // GNU rl_translate_keyseq itself does NOT strip quotes or translate
+    // caret notation; the inputrc/bind parser does that before it calls
+    // here.  Keep `binding_syntax` for the parser's older convenience
+    // path, but the exported rl_translate_keyseq uses the GNU form.
+    if binding_syntax
+        && input.len() >= 2
+        && (input[0] == b'"' || input[0] == b'\'')
+    {
         if input[input.len() - 1] != input[0] {
             return Err(());
         }
@@ -600,7 +626,7 @@ fn translate_impl(sequence: &[u8], meta_prefix: bool) -> Result<Vec<u8>, ()> {
                     }
                     _ => {}
                 }
-            } else if byte == b'^' && index + 1 < input.len() {
+            } else if binding_syntax && byte == b'^' && index + 1 < input.len() {
                 index += 1;
                 byte = caret_value(input[index]);
             }
@@ -876,7 +902,7 @@ fn generic_bind_impl(
         return -1;
     }
 
-    let keys = match translate_impl(keyseq, meta_prefix(state)) {
+    let keys = match translate_impl(keyseq, meta_prefix(state), false) {
         Ok(keys) => keys,
         Err(()) => {
             if kind == ISMACR as c_int && !data.is_null() {
@@ -1038,20 +1064,10 @@ fn function_of_keyseq(state: &Store, keys: &[u8], map: Keymap, kind: *mut c_int)
     let map = if map.is_null() { state.current } else { map };
     let prefix = meta_prefix(state);
 
-    let raw = function_of_raw(map, keys, kind, prefix);
-    if !raw.is_null() {
-        return ptr_to_function(raw);
-    }
-
-    if let Ok(translated) = translate_impl(keys, prefix) {
-        if translated.as_slice() != keys {
-            let translated_pointer = function_of_raw(map, &translated, kind, prefix);
-            if !translated_pointer.is_null() {
-                return ptr_to_function(translated_pointer);
-            }
-        }
-    }
-    None
+    // GNU rl_function_of_keyseq takes RAW key bytes; it does not translate
+    // bind spellings. Callers with a spelling pass it through
+    // rl_translate_keyseq first.
+    ptr_to_function(function_of_raw(map, keys, kind, prefix))
 }
 
 fn collect_invoking(
@@ -1561,7 +1577,7 @@ fn trim_quotes(bytes: &[u8]) -> &[u8] {
 }
 
 fn macro_bind_impl(state: &mut Store, keyseq: &[u8], macro_text: &[u8], map: Keymap) -> c_int {
-    let macro_bytes = match translate_impl(macro_text, meta_prefix(state)) {
+    let macro_bytes = match translate_impl(macro_text, meta_prefix(state), false) {
         Ok(bytes) => bytes,
         Err(()) => return -1,
     };
@@ -2086,7 +2102,7 @@ pub unsafe extern "C" fn rl_bind_keyseq_if_unbound_in_map(
     let mut state = store();
     let map = if map.is_null() { state.current } else { map };
     let prefix = meta_prefix(&state);
-    let keys = match translate_impl(c_bytes(keyseq), prefix) {
+    let keys = match translate_impl(c_bytes(keyseq), prefix, false) {
         Ok(keys) => keys,
         Err(()) => return -1,
     };
@@ -2250,7 +2266,7 @@ pub unsafe extern "C" fn rl_translate_keyseq(
 ) -> c_int {
     ensure_initialized();
     let state = store();
-    let translated = match translate_impl(c_bytes(sequence), meta_prefix(&state)) {
+    let translated = match translate_impl(c_bytes(sequence), meta_prefix(&state), false) {
         Ok(translated) => translated,
         Err(()) => return 1,
     };
@@ -2544,6 +2560,18 @@ mod tests {
         0
     }
 
+    /// Translate a bind spelling and look up the raw key bytes, the way a
+    /// GNU caller must (rl_function_of_keyseq itself takes raw bytes).
+    fn lookup_spelling(spelling: &std::ffi::CStr, kind: *mut c_int) -> RlCommandFunc {
+        let mut raw = [0u8; 64];
+        let mut length = 0;
+        let rc = unsafe {
+            rl_translate_keyseq(spelling.as_ptr(), raw.as_mut_ptr().cast(), &mut length)
+        };
+        assert_eq!(rc, 0);
+        unsafe { rl_function_of_keyseq(raw.as_ptr().cast(), ptr::null_mut(), kind) }
+    }
+
     fn same_function(left: RlCommandFunc, right: RlCommandFunc) -> bool {
         match (left, right) {
             (Some(left), Some(right)) => std::ptr::fn_addr_eq(left, right),
@@ -2554,26 +2582,40 @@ mod tests {
 
     #[test]
     fn translation_covers_gnu_spellings() {
-        assert_eq!(translate_impl(b"\\C-x", true).unwrap(), vec![0x18]);
-        assert_eq!(translate_impl(b"\\C-?", true).unwrap(), vec![0x7f]);
-        assert_eq!(translate_impl(b"^?", true).unwrap(), vec![0x7f]);
-        assert_eq!(translate_impl(b"^X", true).unwrap(), vec![0x18]);
+        assert_eq!(translate_impl(b"\\C-x", true, false).unwrap(), vec![0x18]);
+        assert_eq!(translate_impl(b"\\C-?", true, false).unwrap(), vec![0x7f]);
+        // GNU rl_translate_keyseq does not implement caret notation; the
+        // inputrc/bind parser handles it before calling here.
+        assert_eq!(translate_impl(b"^?", true, false).unwrap(), b"^?".to_vec());
+        assert_eq!(translate_impl(b"^X", true, false).unwrap(), b"^X".to_vec());
         assert_eq!(
-            translate_impl(b"\\e[1;5C", true).unwrap(),
+            translate_impl(b"\\e[1;5C", true, false).unwrap(),
             b"\x1b[1;5C".to_vec()
         );
-        assert_eq!(translate_impl(b"\\M-x", true).unwrap(), vec![0x1b, b'x']);
-        assert_eq!(translate_impl(b"\\M-x", false).unwrap(), vec![0xf8]);
         assert_eq!(
-            translate_impl(b"\"\\C-x\\C-r\"", true).unwrap(),
-            vec![0x18, 0x12]
+            translate_impl(b"\\M-x", true, false).unwrap(),
+            vec![0x1b, b'x']
         );
-        assert_eq!(translate_impl(b"\\x41\\101", true).unwrap(), b"AA".to_vec());
         assert_eq!(
-            translate_impl(b"\\M-\\C-x", true).unwrap(),
+            translate_impl(b"\\M-x", false, false).unwrap(),
+            vec![0xf8]
+        );
+        // Quotes are literal at the ABI layer; the parser trims them.
+        assert_eq!(
+            translate_impl(b"\"\\C-x\\C-r\"", true, false).unwrap(),
+            b"\"\x18\x12\"".to_vec()
+        );
+        assert_eq!(
+            translate_impl(b"\\x41\\101", true, false).unwrap(),
+            b"AA".to_vec()
+        );
+        assert_eq!(
+            translate_impl(b"\\M-\\C-x", true, false).unwrap(),
             vec![0x1b, 0x18]
         );
-        assert!(translate_impl(b"\"unterminated", true).is_err());
+        // Parser convenience mode still strips quotes/handles caret.
+        assert_eq!(translate_impl(b"^?", true, true).unwrap(), vec![0x7f]);
+        assert!(translate_impl(b"\"unterminated", true, true).is_err());
     }
 
     #[test]
@@ -2620,7 +2662,21 @@ mod tests {
             0
         );
         let mut kind = -1;
-        let found = unsafe { rl_function_of_keyseq(c"\\C-x\\C-r".as_ptr(), map, &mut kind) };
+        // rl_function_of_keyseq takes raw key bytes, like GNU; translate the
+        // bind spelling first.
+        let mut raw = [0u8; 16];
+        let mut raw_len = 0;
+        assert_eq!(
+            unsafe {
+                rl_translate_keyseq(
+                    c"\\C-x\\C-r".as_ptr(),
+                    raw.as_mut_ptr().cast(),
+                    &mut raw_len,
+                )
+            },
+            0
+        );
+        let found = unsafe { rl_function_of_keyseq(raw.as_ptr().cast(), map, &mut kind) };
         assert!(same_function(found, function));
         assert_eq!(kind, ISFUNC as c_int);
 
@@ -2709,9 +2765,7 @@ mod tests {
             0
         );
         assert!(same_function(
-            unsafe {
-                rl_function_of_keyseq(c"\\C-x\\C-t".as_ptr(), ptr::null_mut(), ptr::null_mut())
-            },
+            lookup_spelling(c"\\C-x\\C-t", ptr::null_mut()),
             unsafe { rl_named_function(CString::new("transpose-chars").unwrap().as_ptr()) }
         ));
 
@@ -2721,8 +2775,7 @@ mod tests {
             0
         );
         let mut macro_kind = -1;
-        let macro_pointer =
-            unsafe { rl_function_of_keyseq(c"\\C-xm".as_ptr(), ptr::null_mut(), &mut macro_kind) };
+        let macro_pointer = lookup_spelling(c"\\C-xm", &mut macro_kind);
         assert_eq!(macro_kind, ISMACR as c_int);
         let macro_pointer = macro_pointer
             .map(|function| function as *const () as *const c_char)
@@ -2772,10 +2825,7 @@ mod tests {
         .unwrap();
         let path_c = CString::new(path.to_string_lossy().as_bytes()).unwrap();
         assert_eq!(unsafe { rl_read_init_file(path_c.as_ptr()) }, 0);
-        assert!(unsafe {
-            rl_function_of_keyseq(c"\\C-xw".as_ptr(), ptr::null_mut(), ptr::null_mut())
-        }
-        .is_some());
+        assert!(lookup_spelling(c"\\C-xw", ptr::null_mut()).is_some());
         assert_eq!(unsafe { rl_re_read_init_file(0, 0) }, 0);
         let _ = fs::remove_file(&path);
 

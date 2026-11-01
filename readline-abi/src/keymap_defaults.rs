@@ -901,3 +901,30 @@ pub(crate) const VI_INSERTION_KEYMAP_BINDINGS: &[(usize, BindTarget)] = &[
     (254, Cmd("self-insert")),
     (255, Cmd("self-insert")),
 ];
+
+/// Terminal key sequences GNU binds at initialization (`terminal.c`
+/// `bind_termcap_arrow_keys`, xterm/rxvt spellings). These are not
+/// single-byte keymap slots: they form ESC/CSI chains in the keymap trie.
+pub(crate) const TERMINAL_SEQUENCE_BINDINGS: &[(&[u8], &str)] = &[
+    (b"\x1b[A", "previous-history"),
+    (b"\x1b[B", "next-history"),
+    (b"\x1b[C", "forward-char"),
+    (b"\x1b[D", "backward-char"),
+    (b"\x1bOA", "previous-history"),
+    (b"\x1bOB", "next-history"),
+    (b"\x1bOC", "forward-char"),
+    (b"\x1bOD", "backward-char"),
+    (b"\x1b[H", "beginning-of-line"),
+    (b"\x1bOH", "beginning-of-line"),
+    (b"\x1b[1~", "beginning-of-line"),
+    (b"\x1b[F", "end-of-line"),
+    (b"\x1bOF", "end-of-line"),
+    (b"\x1b[4~", "end-of-line"),
+    (b"\x1b[3~", "delete-char"),
+    (b"\x1b[2~", "overwrite-mode"),
+    (b"\x1b[5~", "history-search-backward"),
+    (b"\x1b[6~", "history-search-forward"),
+    (b"\x1b[1;5C", "forward-word"),
+    (b"\x1b[1;5D", "backward-word"),
+    (b"\x1b[3;5~", "kill-word"),
+];

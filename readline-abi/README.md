@@ -34,6 +34,14 @@ readline-abi/scripts/package.sh release
 # dist/release/lib/libreadline.so -> libreadline.so.8
 ```
 
+## Differential conformance
+
+`tests/conformance/run.sh` compiles the same C probe against the system GNU
+readline 8.3 and against this library, then diffs the output. The pure ABI
+surface (state/text/keymap/bind/inputrc/variables/history/completion) is
+expected to match line-for-line; the PTY `readline()` driver is a separate
+last-mile oracle. See `tests/conformance/README.md`.
+
 ## Tests and audit
 
 ```sh
