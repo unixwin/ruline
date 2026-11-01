@@ -128,6 +128,25 @@ pub fn default_emacs_keybindings() -> Keybindings {
     // Edits
     kb.add_binding(KM::CONTROL, KC::Char('t'), edit_bind(EC::SwapGraphemes));
 
+    // GNU history jumps: `\e<`/`\e>` are beginning-of-history /
+    // end-of-history (emacs_keymap.c:399/:401 — `bind -p` shows
+    // `"\e<": beginning-of-history`, `"\e>": end-of-history`), NOT a
+    // buffer-edges move. `M->` returns to the live (new) line, which the
+    // engine's `last_history` models by leaving history traversal.
+    kb.add_binding(KM::ALT, KC::Char('<'), ReedlineEvent::FirstHistoryEntry);
+    kb.add_binding(KM::ALT, KC::Char('>'), ReedlineEvent::LastHistoryEntry);
+    // For kitty keyboard protocol
+    kb.add_binding(
+        KM::SHIFT | KM::ALT,
+        KC::Char(','),
+        ReedlineEvent::FirstHistoryEntry,
+    );
+    kb.add_binding(
+        KM::SHIFT | KM::ALT,
+        KC::Char('.'),
+        ReedlineEvent::LastHistoryEntry,
+    );
+
     // *** ALT ***
     // Moves
     kb.add_binding(
@@ -691,6 +710,49 @@ mod test {
             kb.find_binding(KeyModifiers::ALT, KeyCode::Char('t')),
             Some(ReedlineEvent::Edit(vec![EditCommand::SwapWords]))
         );
+    }
+
+    /// GNU `\e<`/`\e>` — beginning-of-history and end-of-history
+    /// (emacs_keymap.c:399/:401; `bind -p` prints `"\e<":
+    /// beginning-of-history`). They are NOT buffer-edge moves, and the
+    /// vi maps leave them unbound (`bind -m vi-insert -p` reports
+    /// "beginning-of-history (not bound)").
+    #[test]
+    fn meta_angle_brackets_jump_history_edges() {
+        let kb = default_emacs_keybindings();
+        assert_eq!(
+            kb.find_binding(KeyModifiers::ALT, KeyCode::Char('<')),
+            Some(ReedlineEvent::FirstHistoryEntry)
+        );
+        assert_eq!(
+            kb.find_binding(KeyModifiers::ALT, KeyCode::Char('>')),
+            Some(ReedlineEvent::LastHistoryEntry)
+        );
+        // The kitty protocol spells the shifted glyph keys Shift+Alt+','/'.'.
+        assert_eq!(
+            kb.find_binding(KeyModifiers::SHIFT | KeyModifiers::ALT, KeyCode::Char(',')),
+            Some(ReedlineEvent::FirstHistoryEntry)
+        );
+        assert_eq!(
+            kb.find_binding(KeyModifiers::SHIFT | KeyModifiers::ALT, KeyCode::Char('.')),
+            Some(ReedlineEvent::LastHistoryEntry)
+        );
+        // GNU's vi maps do not bind them; neither do ours.
+        for kb in [
+            crate::default_vi_insert_keybindings(),
+            crate::default_vi_normal_keybindings(),
+        ] {
+            assert_eq!(
+                kb.find_binding(KeyModifiers::ALT, KeyCode::Char('<')),
+                None,
+                "vi must leave M-< unbound like GNU"
+            );
+            assert_eq!(
+                kb.find_binding(KeyModifiers::ALT, KeyCode::Char('>')),
+                None,
+                "vi must leave M-> unbound like GNU"
+            );
+        }
     }
 
     #[test]

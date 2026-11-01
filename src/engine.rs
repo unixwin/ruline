@@ -12214,15 +12214,17 @@ mod tests {
 
     #[test]
     fn vi_normal_to_end_rests_on_last_grapheme() {
-        // `Alt+>` (ToEnd) is bound in vi normal; it must land on the last char.
+        // `ReedlineEvent::ToEnd` — reachable through a custom binding; GNU's
+        // vi maps leave `M->` unbound and emacs binds it to end-of-history —
+        // must land on the last char, not the gap past it.
         let mut rl = seam_engine(Box::<crate::Vi>::default());
         rl.run_edit_commands(&[EditCommand::InsertString("abc".into())]);
         drive(&mut rl, &[key(KeyCode::Esc)]);
         rl.run_edit_commands(&[EditCommand::MoveToStart { select: false }]); // 'a'
-        drive(
-            &mut rl,
-            &[KeyEvent::new(KeyCode::Char('>'), KeyModifiers::ALT)],
-        );
+        assert!(matches!(
+            send(&mut rl, ReedlineEvent::ToEnd),
+            EventStatus::Handled
+        ));
         assert_eq!(rl.editor.insertion_point(), 2); // 'c', not 3 (past it)
         assert!(matches!(
             send(&mut rl, ReedlineEvent::ToEnd),
@@ -12628,6 +12630,29 @@ mod tests {
         type_each(&mut rl, &[ch('x')]);
 
         drive(&mut rl, &[ctrl_alt('r')]);
+        assert_eq!(rl.editor.get_buffer(), "");
+    }
+
+    /// `M-<`/`M->` are GNU beginning/end-of-history (emacs_keymap.c:399/:401),
+    /// not buffer edges: `M-<` recalls the OLDEST entry, `M->` returns to the
+    /// live line (empty buffer). T2 F2.
+    #[test]
+    fn meta_angle_brackets_traverse_history_edges() {
+        let mut rl = seam_engine(Box::<Emacs>::default());
+        for line in ["one", "two", "three"] {
+            rl.history
+                .save(HistoryItem::from_command_line(line))
+                .expect("history save ok");
+        }
+        // C-p recalls `three` (the newest entry).
+        drive(&mut rl, &[ctrl('p')]);
+        assert_eq!(rl.editor.get_buffer(), "three");
+        // M-< jumps to the oldest entry, not the buffer start.
+        drive(&mut rl, &[alt('<')]);
+        assert_eq!(rl.editor.get_buffer(), "one");
+        // M-> leaves history for the live line — an empty buffer, not the
+        // buffer end of the recalled line.
+        drive(&mut rl, &[alt('>')]);
         assert_eq!(rl.editor.get_buffer(), "");
     }
 
