@@ -15,7 +15,10 @@ jobs:
         rust:
           - stable
         # Define the feature sets that will be built here (for caching you define a separate name)
-        style: [bashisms, default, sqlite, basqlite, external_printer, system_clipboard]
+        # `sqlite`/`basqlite` are gone with the subtraction pass (the
+        # product history is FileBackedHistory only); requesting them
+        # fails Cargo's feature resolution.
+        style: [bashisms, default, external_printer, system_clipboard]
         include:
           - style: bashisms
             flags: "--features bashisms"
@@ -23,10 +26,6 @@ jobs:
             flags: "--features external_printer"
           - style: default
             flags: ""
-          - style: sqlite
-            flags: "--features sqlite"
-          - style: basqlite
-            flags: "--features bashisms,sqlite"
           - style: system_clipboard
             flags: "--features system_clipboard"
 
