@@ -99,8 +99,6 @@ impl ParsedViSequence {
         match (&self.command, &self.motion) {
             (Some(Command::EnterViInsert), ParseResult::Incomplete)
             | (Some(Command::EnterViAppend), ParseResult::Incomplete)
-            | (Some(Command::NewlineAbove), ParseResult::Incomplete)
-            | (Some(Command::NewlineBelow), ParseResult::Incomplete)
             | (Some(Command::ChangeToLineEnd), ParseResult::Incomplete)
             | (Some(Command::AppendToEnd), ParseResult::Incomplete)
             | (Some(Command::PrependToStart), ParseResult::Incomplete)

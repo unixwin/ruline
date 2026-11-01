@@ -1457,6 +1457,59 @@ mod test {
         );
     }
 
+    /// GNU's vi-command keymap leaves `o`/`O` unbound (`bind -m
+    /// vi-command -p` prints no row for them — vim's open-line commands
+    /// do not exist in readline), so the key must be a no-op that leaves
+    /// the cache empty for the NEXT key. T2 F5.
+    #[test]
+    fn normal_mode_o_is_unbound_and_drops_the_key() {
+        for c in ['o', 'O'] {
+            let mut vi = Vi {
+                mode: ViMode::Normal,
+                ..Default::default()
+            };
+            assert_eq!(
+                vi.parse_event(key(KeyCode::Char(c), KeyModifiers::NONE)),
+                ReedlineEvent::None
+            );
+            assert!(vi.cache.is_empty(), "`{c}` must not linger in the cache");
+        }
+        // The key after `o` still parses from scratch: `C` changes to
+        // line end (the T2 repro: `echo AB` Esc o C -> GNU edits in place
+        // instead of opening a continuation line). Windows INPUT_RECORDs
+        // spell the uppercase key Shift+'c'.
+        let mut vi = Vi {
+            mode: ViMode::Normal,
+            ..Default::default()
+        };
+        let _ = vi.parse_event(key(KeyCode::Char('o'), KeyModifiers::NONE));
+        let result = vi.parse_event(key(KeyCode::Char('c'), KeyModifiers::SHIFT));
+        assert_eq!(
+            result,
+            ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![EditCommand::ClearToLineEnd]),
+                ReedlineEvent::Repaint
+            ])
+        );
+    }
+
+    /// ruline's vi Visual extension keeps `o` = swap cursor/anchor — the
+    /// modal twin vim defines; GNU readline has no visual mode either way.
+    #[test]
+    fn visual_mode_o_still_swaps_cursor_and_anchor() {
+        let mut vi = Vi {
+            mode: ViMode::Visual,
+            ..Default::default()
+        };
+        let result = vi.parse_event(key(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(
+            result,
+            ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![
+                EditCommand::SwapCursorAndAnchor
+            ])])
+        );
+    }
+
     #[test]
     fn linewise_dd_emits_linewise_cut() {
         let mut vi = Vi {
