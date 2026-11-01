@@ -348,6 +348,15 @@ pub struct Reedline {
     // collected and again as reedline_events are handled.
     event_replay_depths: VecDeque<u16>,
 
+    // Already-parsed events that followed a host-command suspension in
+    // the same input batch. GNU's `_rl_abort_internal` longjmps out of
+    // the current command (util.c:99) but the bytes behind it are still
+    // in readline's input buffer, so the next command consumes them —
+    // `C-g X` leaves `X` to insert. The engine has already read those
+    // keys, so they are parked here and run head-of-queue when the host
+    // resumes the editor, before fresh terminal input.
+    pending_events: VecDeque<(ReedlineEvent, u16)>,
+
     // `ReedlineEvent::QuotedInsert` armed: the next key press is consumed
     // as literal data instead of dispatching through the keymap (GNU
     // readline.c rl_quoted_insert — one input character verbatim).
@@ -998,6 +1007,24 @@ fn quoted_insert_char(event: &Event) -> Option<char> {
     None
 }
 
+/// A key a fresh emacs / vi-insert keymap resolves to `self-insert`: a
+/// printable character without a chord modifier. GNU `_rl_insert_typein`
+/// (input.c:464) keeps consuming these while they wait in the input
+/// buffer, inserting the run with one `rl_insert_text`; the keys after
+/// the first never reach `_rl_dispatch_subseq`, so they never reach
+/// `_rl_add_macro_char` either.
+fn is_typein_key(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(KeyEvent {
+            code: KeyCode::Char(_),
+            modifiers,
+            kind,
+            ..
+        }) if *kind != KeyEventKind::Release && crate::edit_mode::is_text_char(*modifiers)
+    )
+}
+
 /// A key press that stands for a newline in pasted text: a bare `Enter` (CR),
 /// or `Ctrl-J`, which is how a raw LF arrives in raw mode.
 fn is_pasted_newline(event: &Event) -> bool {
@@ -1079,6 +1106,7 @@ impl Reedline {
             immediately_accept: false,
             pending_input: VecDeque::new(),
             event_replay_depths: VecDeque::new(),
+            pending_events: VecDeque::new(),
             quoted_insert_count: 1,
             recording: None,
             last_macro: Vec::new(),
@@ -1927,7 +1955,7 @@ impl Reedline {
             let mut events: Vec<Event> = vec![];
 
             if !self.immediately_accept {
-                if self.pending_input.is_empty() {
+                if self.pending_input.is_empty() && self.pending_events.is_empty() {
                     let keyseq_wait = self.keyseq_remaining();
                     if self.input_needs_polling() || completer_pending || keyseq_wait.is_some() {
                         // With a sequence pending, wake at its deadline even when
@@ -2293,6 +2321,35 @@ impl Reedline {
         }
     }
 
+    /// Repeat the parse loop's macro-recording corrections for an event
+    /// nested inside a [`ReedlineEvent::Multiple`].
+    ///
+    /// The parse loop records every raw key before its mode resolves it and
+    /// then erases the keys that invoke a control: a chord's `Pending` half
+    /// and the `EndKbdMacro`/refused `CallLastKbdMacro` key are not part of
+    /// the recording (GNU subtracts `rl_key_sequence_length` at
+    /// macro.c:278 and erases the refused key at macro.c:298). A mode that
+    /// flushed a parked chord wraps those events in `Multiple`, where the
+    /// top-level corrections never run, so apply them here before the
+    /// engine dispatches the nested event.
+    fn note_nested_chord_key(&mut self, event: &ReedlineEvent) {
+        let chord_key = matches!(
+            event,
+            ReedlineEvent::Pending | ReedlineEvent::EndKbdMacro | ReedlineEvent::CallLastKbdMacro
+        );
+        if !chord_key || self.recording.is_none() {
+            return;
+        }
+        if let Some(recording) = self.recording.as_mut() {
+            recording.pop();
+        }
+        if matches!(event, ReedlineEvent::CallLastKbdMacro) {
+            // "no recursive macros" spends the refused key's argument
+            // too (macro.c:298).
+            self.pending_arg = None;
+        }
+    }
+
     /// Show the current completions in a menu without touching the line.
     ///
     /// The readline `possible-completions` counterpart: candidates are displayed
@@ -2503,8 +2560,21 @@ impl Reedline {
             }
         } else {
             let mut edits = vec![];
+            // Whether the previous live key was a `self-insert` character
+            // in the same typeahead run. GNU `_rl_insert_typein`
+            // (input.c:464) consumes a contiguous run of them as one
+            // command, so only the run's first key is dispatched — and
+            // therefore recorded (`_rl_add_macro_char`, readline.c:907).
+            // Replayed macro keys are read one at a time from
+            // `rl_executing_macro`, never through the ibuffer, so the run
+            // never spans them. The run is approximated by the key's
+            // shape (GNU tests `map[key] == rl_insert`); a plain
+            // character rebound to another command is the one case where
+            // the two disagree.
+            let mut typein_run = false;
             for event in events {
                 self.replay_depth = self.event_replay_depths.pop_front().unwrap_or(0);
+                let typein_key = self.replay_depth == 0 && is_typein_key(&event);
                 // Macro recording runs ahead of everything, the way
                 // GNU's `_rl_add_macro_char` appends every dispatched
                 // key before dispatching it (readline.c:907): the
@@ -2519,7 +2589,7 @@ impl Reedline {
                         ..
                     }) = event
                     {
-                        if kind != KeyEventKind::Release {
+                        if kind != KeyEventKind::Release && !(typein_run && typein_key) {
                             recording.push(crate::KeyCombination {
                                 modifier: modifiers,
                                 key_code: code,
@@ -2527,6 +2597,7 @@ impl Reedline {
                         }
                     }
                 }
+                typein_run = typein_key;
                 // Reclassify a newline key (bare `Enter`, or `Ctrl-J` for a raw
                 // LF) that the oracle judges paste-embedded into a newline even
                 // when a full burst was NOT detected (a short fast paste, e.g.
@@ -2554,6 +2625,9 @@ impl Reedline {
                             edits.push(EditCommand::InsertChar(c));
                         }
                     }
+                    // The quoted key was read by `rl_quoted_insert`, not
+                    // by a typeahead run: the next key starts a new one.
+                    typein_run = false;
                     continue;
                 }
                 // Char-search consumes one key the same way
@@ -2577,6 +2651,9 @@ impl Reedline {
                             }));
                         }
                     }
+                    // Char-search read this key itself, so the next one
+                    // is not part of the same `rl_insert` run.
+                    typein_run = false;
                     continue;
                 }
                 if let Ok(raw) = ReedlineRawEvent::try_from(event) {
@@ -2591,6 +2668,10 @@ impl Reedline {
                             if let Some(recording) = self.recording.as_mut() {
                                 recording.pop();
                             }
+                            // The popped key was not a recorded
+                            // self-insert: the next live character starts
+                            // a fresh typeahead run.
+                            typein_run = false;
                         }
                         // Numeric-argument keys accumulate in place and
                         // never reach the queue — GNU reads them inside
@@ -2634,6 +2715,7 @@ impl Reedline {
                             if let Some(recording) = self.recording.as_mut() {
                                 recording.pop();
                             }
+                            typein_run = false;
                             let count = self.pending_arg.take().map_or(0, |arg| arg.count());
                             if self.end_kbd_macro() && count > 0 {
                                 self.call_last_kbd_macro(count - 1);
@@ -2647,6 +2729,7 @@ impl Reedline {
                                 if let Some(recording) = self.recording.as_mut() {
                                     recording.pop();
                                 }
+                                typein_run = false;
                                 self.pending_arg = None;
                             } else {
                                 let count = self.pending_arg.take().map_or(1, |arg| arg.count());
@@ -2755,9 +2838,14 @@ impl Reedline {
         // pre-paint `set_edit_mode` below still clamps no-command switches.
         self.editor.sync_edit_mode(self.edit_mode.edit_mode());
 
-        // Handle reedline events.
+        // Handle reedline events. Events parked by an earlier host-command
+        // suspension run first, in their original order, ahead of this
+        // batch's fresh input (GNU's input buffer keeps bytes queued behind
+        // `rl_abort`).
+        let mut queue: VecDeque<(ReedlineEvent, u16)> = std::mem::take(&mut self.pending_events);
+        queue.extend(reedline_events);
         let mut need_repaint = false;
-        for (event, depth) in reedline_events {
+        while let Some((event, depth)) = queue.pop_front() {
             self.replay_depth = depth;
             match self.handle_event(prompt, event)? {
                 EventStatus::Exits(signal) => {
@@ -2767,6 +2855,14 @@ impl Reedline {
                         // We are about to quit the editor, move the cursor below the input
                         // area, for external commands or new read_line call
                         self.painter.move_cursor_to_end()?;
+                    }
+                    if matches!(&signal, Signal::HostCommand(_)) {
+                        // A host command suspends the editor and the host
+                        // resumes it with another `read_line`. GNU's abort
+                        // longjmps out of the command but leaves the rest
+                        // of the input buffer intact, so the keys that
+                        // arrived in the same batch must still run.
+                        self.pending_events.extend(queue.drain(..));
                     }
                     // A clear earlier in this batch left it hidden and no
                     // paint follows. The exit is what to report, so a failed
@@ -3011,8 +3107,27 @@ impl Reedline {
             | ReedlineEvent::Submit
             | ReedlineEvent::SubmitOrNewline => {
                 if let Some(string) = self.history_cursor.string_at_cursor() {
+                    // GNU `_rl_isearch_fini` (isearch.c:300-304) leaves
+                    // point at `cxt->sline_index` — the start of the
+                    // matched substring — not at the end of the recalled
+                    // line. Reverse isearch scans a fresh history line
+                    // from its right edge (isearch.c:854
+                    // `sline_len - search_string_index`), so the last
+                    // occurrence is the one it landed on.
+                    let point = match self.history_cursor.get_navigation() {
+                        HistoryNavigationQuery::SubstringSearch(needle) if !needle.is_empty() => {
+                            string.rfind(&needle).unwrap_or(string.len())
+                        }
+                        _ => string.len(),
+                    };
                     self.editor
                         .set_buffer(string, UndoBehavior::CreateUndoPoint);
+                    let point = point.min(self.editor.get_buffer().len());
+                    self.editor.edit_buffer(
+                        |buf| buf.set_insertion_point(point),
+                        UndoBehavior::MoveCursor,
+                    );
+                    self.editor.commit_cursor();
                 }
                 // Accepting an isearch match leaves the history position
                 // on the found entry (GNU's isearch lands `where_history`
@@ -3835,8 +3950,16 @@ impl Reedline {
             }
             ReedlineEvent::Multiple(events) => {
                 let mut latest_signal = EventStatus::Inapplicable;
-                for event in events {
-                    match self.handle_editor_event(prompt, event)? {
+                let mut rest = events.into_iter();
+                while let Some(event) = rest.next() {
+                    // A mode that flushes a parked chord hands the prefix
+                    // and the current key back as one `Multiple` — niu's
+                    // wrapper does this for `C-x`. The parse loop's
+                    // recording corrections only run for top-level
+                    // events, so repeat them here (see
+                    // [`Self::note_nested_chord_key`]).
+                    self.note_nested_chord_key(&event);
+                    match self.handle_event(prompt, event)? {
                         EventStatus::Handled => {
                             latest_signal = EventStatus::Handled;
                         }
@@ -3844,9 +3967,15 @@ impl Reedline {
                             // NO OP
                         }
                         EventStatus::Exits(signal) => {
-                            // TODO: Check if we want to allow execution to
-                            // proceed if there are more events after the
-                            // terminating
+                            // A host command only suspends the editor: the
+                            // rest of this `Multiple` is still queued input
+                            // (GNU's input buffer survives `rl_abort`), so
+                            // park it for the resumed read instead of
+                            // dropping it.
+                            if matches!(&signal, Signal::HostCommand(_)) {
+                                let depth = self.replay_depth;
+                                self.pending_events.extend(rest.map(|event| (event, depth)));
+                            }
                             return Ok(EventStatus::Exits(signal));
                         }
                     }
@@ -6767,7 +6896,12 @@ mod tests {
     fn kbd_macro_records_and_replays() {
         let mut rl = seam_engine(Box::<crate::Emacs>::default());
         let cx = ctrl('x');
-        drive(&mut rl, &[cx, ch('('), ch('h'), ch('i'), cx, ch(')')]);
+        drive(&mut rl, &[cx, ch('(')]);
+        // Human typing: one key per input batch, so each is dispatched
+        // (and recorded) separately. A same-batch run coalesces like
+        // GNU's `_rl_insert_typein` — see the typein test below.
+        type_each(&mut rl, &[ch('h'), ch('i')]);
+        drive(&mut rl, &[cx, ch(')')]);
         // Typed keys both record and act.
         assert_eq!(rl.editor.get_buffer(), "hi");
         // The invoking keystrokes are not part of the recording:
@@ -6786,6 +6920,103 @@ mod tests {
         assert_eq!(rl.pending_input.len(), 2);
         drive(&mut rl, &[]);
         assert_eq!(rl.editor.get_buffer(), "hihi");
+    }
+
+    /// GNU `_rl_insert_typein` (input.c:464): a run of self-insert keys
+    /// waiting in the input buffer is inserted by one command, so only
+    /// the run's first key reaches `_rl_add_macro_char`
+    /// (readline.c:907). The oracle's `C-x ( ab C-x ) C-x e` burst
+    /// therefore records just `a` and replays one character — `aba`.
+    #[test]
+    fn kbd_macro_typein_run_records_only_its_first_key() {
+        let mut rl = seam_engine(Box::<crate::Emacs>::default());
+        let cx = ctrl('x');
+        drive(&mut rl, &[cx, ch('('), ch('a'), ch('b'), cx, ch(')')]);
+        // Both characters were inserted...
+        assert_eq!(rl.editor.get_buffer(), "ab");
+        // ...but the typeahead run dispatched only `a`.
+        assert_eq!(
+            rl.last_macro,
+            vec![kc(KeyModifiers::NONE, KeyCode::Char('a'))]
+        );
+        drive(&mut rl, &[cx, ch('e')]);
+        drive(&mut rl, &[]);
+        assert_eq!(rl.editor.get_buffer(), "aba");
+        assert_eq!(rl.editor.insertion_point(), 3);
+    }
+
+    /// A host wrapper can hand a flushed chord to the engine as one
+    /// `Multiple` (niu's `ChordEditMode` parks `C-x` and replays it with
+    /// the resolving key). The macro controls inside it must still act,
+    /// and the chord's raw keys must be erased from the recording.
+    #[test]
+    fn kbd_macro_controls_nested_in_multiple_are_applied() {
+        let mut rl = seam_engine(Box::<crate::Emacs>::default());
+        let prompt = DefaultPrompt::default();
+        let cx = kc(KeyModifiers::CONTROL, KeyCode::Char('x'));
+
+        rl.handle_event(
+            &prompt,
+            ReedlineEvent::Multiple(vec![ReedlineEvent::Pending, ReedlineEvent::StartKbdMacro]),
+        )
+        .unwrap();
+        assert!(rl.recording.is_some(), "nested start arms the recorder");
+
+        // The parse loop records each raw key before the mode resolves
+        // it: the body key, then the ending chord's `C-x` and `)`.
+        for key in [kc(KeyModifiers::NONE, KeyCode::Char('a')), cx.clone()]
+            .into_iter()
+            .chain([kc(KeyModifiers::NONE, KeyCode::Char(')'))])
+        {
+            rl.recording.as_mut().expect("recording").push(key);
+        }
+        rl.handle_event(
+            &prompt,
+            ReedlineEvent::Multiple(vec![ReedlineEvent::Pending, ReedlineEvent::EndKbdMacro]),
+        )
+        .unwrap();
+        assert_eq!(
+            rl.last_macro,
+            vec![kc(KeyModifiers::NONE, KeyCode::Char('a'))]
+        );
+
+        // The nested call replays the recording.
+        rl.handle_event(
+            &prompt,
+            ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Pending,
+                ReedlineEvent::CallLastKbdMacro,
+            ]),
+        )
+        .unwrap();
+        assert_eq!(rl.pending_input.len(), 1);
+    }
+
+    /// A host command only suspends the editor. Keys read in the same
+    /// batch are still queued input in GNU (`_rl_abort_internal`,
+    /// util.c:99, longjmps without draining the input buffer), so
+    /// `C-g X` runs `X` after the host resumes — `abcX`.
+    #[test]
+    fn host_command_suspension_keeps_the_rest_of_the_batch() {
+        let mut rl = seam_engine(emacs_with(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('g'),
+            ReedlineEvent::ExecuteHostCommand("abort".into()),
+        ));
+        drive(&mut rl, &[ch('a'), ch('b'), ch('c')]);
+        assert_eq!(rl.editor.get_buffer(), "abc");
+
+        // One burst: the abort suspends mid-batch, `X` follows it.
+        drive(&mut rl, &[ctrl('g'), ch('X')]);
+        assert_eq!(rl.editor.get_buffer(), "abc", "X waits for the resume");
+        assert!(rl.suspended_state.is_some());
+
+        // The host resumes with a fresh read_line: the parked `X` runs
+        // before any new terminal input.
+        let _ = rl.begin_read();
+        drive(&mut rl, &[]);
+        assert_eq!(rl.editor.get_buffer(), "abcX");
+        assert_eq!(rl.editor.insertion_point(), 4);
     }
 
     /// Recording captures keystrokes, not commands: a bound key like
@@ -12655,6 +12886,37 @@ mod tests {
         drive(&mut rl, &[alt('p')]);
         assert_eq!(rl.editor.get_buffer(), "cd bar");
         assert_eq!(rl.editor.insertion_point(), 3);
+    }
+
+    /// `C-r beta Enter` — GNU `_rl_isearch_fini` (isearch.c:300-304)
+    /// leaves point at `cxt->sline_index`, the match start, not at the
+    /// end of the recalled line.
+    #[test]
+    fn incremental_history_search_accept_lands_on_match_start() {
+        let mut rl = seam_engine(Box::<crate::Emacs>::default());
+        seed_history(&mut rl, &["alpha one", "beta two", "gamma three"]);
+        drive(&mut rl, &[ctrl('r')]);
+        type_each(&mut rl, &[ch('b'), ch('e'), ch('t'), ch('a')]);
+        drive(&mut rl, &[key(KeyCode::Enter)]);
+
+        assert_eq!(rl.editor.get_buffer(), "beta two");
+        assert_eq!(rl.editor.insertion_point(), 0);
+        assert_eq!(rl.input_mode, InputMode::Regular);
+    }
+
+    /// Reverse isearch scans a history line from its right edge
+    /// (isearch.c:854), so it lands on the last occurrence of the
+    /// needle.
+    #[test]
+    fn incremental_history_search_accept_lands_on_the_last_occurrence() {
+        let mut rl = seam_engine(Box::<crate::Emacs>::default());
+        seed_history(&mut rl, &["beta one beta"]);
+        drive(&mut rl, &[ctrl('r')]);
+        type_each(&mut rl, &[ch('b'), ch('e'), ch('t'), ch('a')]);
+        drive(&mut rl, &[key(KeyCode::Enter)]);
+
+        assert_eq!(rl.editor.get_buffer(), "beta one beta");
+        assert_eq!(rl.editor.insertion_point(), 9);
     }
 
     #[test]

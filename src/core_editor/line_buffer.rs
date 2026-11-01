@@ -365,7 +365,20 @@ impl LineBuffer {
     /// `*_index` scans collapsed into. Returns the bar boundary; these buffer
     /// edits work in gap (bar) terms, so caret geometry doesn't apply.
     fn word_boundary(&self, kind: WordKind, edge: WordEdge, direction: Direction) -> usize {
-        word::locate_word(&self.lines, self.cursor.head(), kind, edge, direction)
+        self.word_boundary_at(self.cursor.head(), kind, edge, direction)
+    }
+
+    /// [`word_boundary`](Self::word_boundary) from an arbitrary byte offset.
+    /// GNU's word commands move `rl_point` a step at a time; this is the
+    /// equivalent of starting at that intermediate point.
+    fn word_boundary_at(
+        &self,
+        origin: usize,
+        kind: WordKind,
+        edge: WordEdge,
+        direction: Direction,
+    ) -> usize {
+        word::locate_word(&self.lines, origin, kind, edge, direction)
     }
 
     /// Returns true if cursor is at the end of the buffer with preceding whitespace.
@@ -586,19 +599,33 @@ impl LineBuffer {
         self.set_head(self.word_boundary(WordKind::Unicode, WordEdge::End, Direction::Forward));
     }
 
-    /// Capitalizes the current word: the first character is upper cased and
-    /// the rest of the word keeps its case (GNU readline `capitalize-word`,
-    /// bound to M-c in its emacs map). The insertion point moves past the
-    /// word, matching [`Self::uppercase_word`].
+    /// Capitalizes the word at point — GNU `rl_capitalize_word`
+    /// (`rl_change_case`, text.c:1447): from the insertion point, move
+    /// one word forward, upper case the first alphanumeric character of
+    /// that span and lower case the rest. The insertion point lands on
+    /// the span's end; at the end of a word there is nothing to change
+    /// and point does not move (GNU's empty `start == end` span).
     pub fn capitalize_word(&mut self) {
-        let change_range = self.current_word_range();
-        let mut chars = self.get_buffer()[change_range.clone()].chars();
-        if let Some(first) = chars.next() {
-            let mut capitalized = first.to_uppercase().collect::<String>();
-            capitalized.extend(chars);
-            self.replace_range(change_range, &capitalized);
+        let start = self.insertion_point();
+        let end =
+            self.word_boundary_at(start, WordKind::Unicode, WordEdge::End, Direction::Forward);
+        let mut in_word = false;
+        let mut changed = String::with_capacity(end.saturating_sub(start));
+        for c in self.get_buffer()[start..end].chars() {
+            if c.is_alphanumeric() {
+                if in_word {
+                    changed.extend(c.to_lowercase());
+                } else {
+                    changed.extend(c.to_uppercase());
+                    in_word = true;
+                }
+            } else {
+                in_word = false;
+                changed.push(c);
+            }
         }
-        self.set_head(self.word_boundary(WordKind::Unicode, WordEdge::End, Direction::Forward));
+        self.replace_range(start..end, &changed);
+        self.set_head(start + changed.len());
     }
 
     /// Switches the ASCII case of the current char
@@ -772,24 +799,54 @@ impl LineBuffer {
         self.clear_range(self.insertion_point()..right_word_index);
     }
 
-    /// Swaps current word with word on right
+    /// Transpose the words around point — GNU `rl_transpose_words`
+    /// (text.c:1592). The walk is GNU's exactly: forward one word to the
+    /// second word's end, back over that word, back over the first word,
+    /// then forward once to the first word's end. The two spans swap and
+    /// point lands on the second word's end. At end of line the forward
+    /// step does not move, so the two words *before* point transpose.
+    /// Fewer than two words leaves the buffer alone and restores point
+    /// (GNU dings and restores `orig_point`).
     pub fn swap_words(&mut self) {
-        let word_1_range = self.current_word_range();
-        self.set_head(self.word_boundary(WordKind::Unicode, WordEdge::End, Direction::Forward));
-        let word_2_range = self.current_word_range();
+        let orig_point = self.insertion_point();
+        let w2_end = self.word_boundary_at(
+            orig_point,
+            WordKind::Unicode,
+            WordEdge::End,
+            Direction::Forward,
+        );
+        let w2_beg = self.word_boundary_at(
+            w2_end,
+            WordKind::Unicode,
+            WordEdge::Start,
+            Direction::Backward,
+        );
+        let w1_beg = self.word_boundary_at(
+            w2_beg,
+            WordKind::Unicode,
+            WordEdge::Start,
+            Direction::Backward,
+        );
+        let w1_end =
+            self.word_boundary_at(w1_beg, WordKind::Unicode, WordEdge::End, Direction::Forward);
 
-        if word_1_range != word_2_range {
-            self.set_head(self.word_boundary(
-                WordKind::Unicode,
-                WordEdge::Start,
-                Direction::Backward,
-            ));
-            let insertion_line = self.get_buffer();
-            let word_1 = insertion_line[word_1_range.clone()].to_string();
-            let word_2 = insertion_line[word_2_range.clone()].to_string();
-            self.replace_range(word_2_range, &word_1);
-            self.replace_range(word_1_range, &word_2);
+        // GNU's two-word check (text.c:1616): no second word, or the
+        // spans overlap.
+        if w1_beg == w2_beg || w2_beg < w1_end || w2_end <= w2_beg {
+            self.set_head(orig_point);
+            return;
         }
+
+        let buffer = self.get_buffer();
+        let word_1 = buffer[w1_beg..w1_end].to_string();
+        let word_2 = buffer[w2_beg..w2_end].to_string();
+        // Replace the later word first so the earlier range's offsets
+        // stay valid (text.c:1634 `Do the stuff at word2 first`).
+        self.replace_range(w2_beg..w2_end, &word_1);
+        self.replace_range(w1_beg..w1_end, &word_2);
+        // The whole word1..word2 span keeps its length, so the original
+        // w2_end is still the end of the transposed pair (text.c:1644).
+        self.set_head(w2_end);
     }
 
     /// Swaps current grapheme with grapheme on right
@@ -1420,12 +1477,17 @@ mod test {
     }
 
     #[rstest]
-    #[case("This is a test", 13, "This is a Test", 14)]
+    // GNU `rl_change_case` starts at point: a point inside the last word
+    // capitalizes that character and downcases the rest, and a point at
+    // the word's end has nothing to change.
+    #[case("This is a test", 13, "This is a tesT", 14)]
     #[case("This is a test", 10, "This is a Test", 14)]
+    #[case("This is a test", 9, "This is a Test", 14)]
     #[case("", 0, "", 0)]
     #[case("this", 0, "This", 4)]
-    #[case("this", 4, "This", 4)]
-    #[case("ALREADY", 0, "ALREADY", 7)]
+    #[case("this", 4, "this", 4)]
+    #[case("hELLO world", 0, "Hello world", 5)]
+    #[case("ALREADY", 0, "Already", 7)]
     fn capitalize_word_works(
         #[case] input: &str,
         #[case] in_location: usize,
@@ -1516,9 +1578,13 @@ mod test {
     }
 
     #[rstest]
-    #[case("This is a test", 8, "This is test a", 8)]
-    #[case("This is a test", 0, "is This a test", 0)]
-    #[case("This is a test", 14, "This is a test", 14)]
+    // GNU `rl_transpose_words` (text.c:1592): point lands on the second
+    // word's end; at end of line the two words before point swap.
+    #[case("This is a test", 8, "This a is test", 9)]
+    #[case("This is a test", 0, "This is a test", 0)]
+    #[case("This is a test", 14, "This is test a", 14)]
+    #[case("one two three", 13, "one three two", 13)]
+    #[case("one two three", 4, "two one three", 7)]
     fn swap_words_works(
         #[case] input: &str,
         #[case] in_location: usize,

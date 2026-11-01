@@ -49,7 +49,12 @@ pub fn default_emacs_keybindings() -> Keybindings {
     // readline sees the byte (signals.c rl_stop handles the caught
     // signal). With ISIG off there is no VSUSP delivery, so we bind the
     // suspend event directly to reproduce GNU's observable behavior.
-    // Undo stays on C-_, GNU's binding.
+    // Undo is C-_ (emacs_keymap.c:66 `rl_undo_command`). crossterm
+    // decodes the 0x1f byte as Control-'7' (`\x1C`..`\x1F` maps to
+    // '4'..'7'), so the byte spelling is bound as well as the
+    // character the kitty protocol reports.
+    kb.add_binding(KM::CONTROL, KC::Char('_'), edit_bind(EC::Undo));
+    kb.add_binding(KM::CONTROL, KC::Char('7'), edit_bind(EC::Undo));
     kb.add_binding(KM::CONTROL, KC::Char('g'), edit_bind(EC::Redo));
     kb.add_binding(KM::CONTROL, KC::Char('z'), ReedlineEvent::Suspend);
     // GNU revert-line (undo.c:331): M-r and M-C-r undo every change to
@@ -159,10 +164,13 @@ pub fn default_emacs_keybindings() -> Keybindings {
         KC::Char('m'),
         ReedlineEvent::Edit(vec![EditCommand::BackspaceWord]),
     );
-    // Case changes
+    // Case changes and transposition: GNU's emacs_meta_keymap binds
+    // M-u/M-l/M-c to upcase/downcase/capitalize-word and M-t to
+    // transpose-words (emacs_keymap.c:447 `rl_transpose_words`).
     kb.add_binding(KM::ALT, KC::Char('u'), edit_bind(EC::UppercaseWord));
     kb.add_binding(KM::ALT, KC::Char('l'), edit_bind(EC::LowercaseWord));
-    kb.add_binding(KM::ALT, KC::Char('c'), edit_bind(EC::CapitalizeChar));
+    kb.add_binding(KM::ALT, KC::Char('c'), edit_bind(EC::CapitalizeWord));
+    kb.add_binding(KM::ALT, KC::Char('t'), edit_bind(EC::SwapWords));
 
     // GNU `digit-argument` (misc.c:230): `M-0`..`M-9` accumulate the
     // numeric argument, `M--` negates it — the emacs_meta_keymap rows
@@ -656,6 +664,32 @@ mod test {
         assert_eq!(
             emacs.parse_event(key('-', KeyModifiers::ALT)),
             ReedlineEvent::DigitArgument(None)
+        );
+    }
+
+    /// GNU `emacs_standard_keymap`/`emacs_meta_keymap` favorites:
+    /// C-_ is `undo` (emacs_keymap.c:66), M-c is `capitalize-word`,
+    /// M-u/M-l are `upcase-word`/`downcase-word`, and M-t is
+    /// `transpose-words` (emacs_keymap.c:430-447).
+    #[test]
+    fn gnu_case_and_undo_bindings() {
+        let kb = default_emacs_keybindings();
+        assert_eq!(
+            kb.find_binding(KeyModifiers::CONTROL, KeyCode::Char('_')),
+            Some(ReedlineEvent::Edit(vec![EditCommand::Undo]))
+        );
+        // crossterm decodes the C-_ byte 0x1f as Control-'7'.
+        assert_eq!(
+            kb.find_binding(KeyModifiers::CONTROL, KeyCode::Char('7')),
+            Some(ReedlineEvent::Edit(vec![EditCommand::Undo]))
+        );
+        assert_eq!(
+            kb.find_binding(KeyModifiers::ALT, KeyCode::Char('c')),
+            Some(ReedlineEvent::Edit(vec![EditCommand::CapitalizeWord]))
+        );
+        assert_eq!(
+            kb.find_binding(KeyModifiers::ALT, KeyCode::Char('t')),
+            Some(ReedlineEvent::Edit(vec![EditCommand::SwapWords]))
         );
     }
 
