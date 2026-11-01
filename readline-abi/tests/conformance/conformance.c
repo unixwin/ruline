@@ -27,6 +27,11 @@ extern int maybe_save_line(void);
 extern int maybe_unsave_line(void);
 extern int maybe_replace_line(void);
 
+/* The legacy completion spellings are also hidden behind `#if 0`. */
+extern char **completion_matches(char *, rl_compentry_func_t *);
+extern char *filename_completion_function(const char *, int);
+extern char *username_completion_function(const char *, int);
+
 static void section(const char *name) {
     printf("== %s ==\n", name);
 }
@@ -65,6 +70,15 @@ static int free_sorted(char **items) {
         free(items);
     }
     return count;
+}
+
+static void print_capture(const char *key, FILE *file) {
+    char buffer[512];
+    fflush(file);
+    rewind(file);
+    while (fgets(buffer, sizeof(buffer), file) != NULL) {
+        printf("%s|%s", key, buffer);
+    }
 }
 
 static void print_keyseq(const char *key, const char *spelling) {
@@ -1002,6 +1016,9 @@ int main(void) {
     }
 
     section("history-nav");
+    /* Consume any saved line left by earlier probes so the navigation cases
+     * below start from the same state as GNU. */
+    (void)rl_end_of_history(1, 0);
     clear_history();
     add_history("one");
     add_history("two");
@@ -1206,6 +1223,146 @@ int main(void) {
             (int)offsetof(struct readline_state, reserved));
     integer("struct.reserved.size",
             (int)sizeof(((struct readline_state *)0)->reserved));
+
+    section("remaining-keymap");
+    {
+        Keymap map = rl_make_bare_keymap();
+        rl_command_func_t *self_insert = rl_named_function("self-insert");
+        rl_command_func_t *universal = rl_named_function("universal-argument");
+        int found = 0;
+        int entries = 0;
+        for (int i = 0; funmap != NULL && funmap[i] != NULL; i++) {
+            entries++;
+            if (strcmp(funmap[i]->name, "self-insert") == 0) {
+                found = funmap[i]->function == self_insert;
+            }
+        }
+        integer("funmap.entries_positive", entries > 0);
+        integer("funmap.self_insert_matches", found);
+        integer("set_key.rc", rl_set_key("Q", self_insert, map));
+        integer("set_key.binding_map", rl_binding_keymap == map);
+        integer("bind.universal.rc",
+                rl_bind_key_in_map('u', universal, map));
+        integer("trim.prefix", rl_trim_arg_from_keyseq("u5x", 3, map));
+        integer("trim.none", rl_trim_arg_from_keyseq("x", 1, map));
+        integer("trim.only_argument", rl_trim_arg_from_keyseq("u5", 2, map));
+        rl_free_keymap(map);
+    }
+
+    section("remaining-completion");
+    {
+        char **matches = completion_matches("al", generator);
+        int n = 0;
+        if (matches != NULL) {
+            while (matches[n] != NULL) {
+                n++;
+            }
+        }
+        print_sorted(matches, n, "completion.legacy_matches");
+        if (matches != NULL) {
+            for (int i = 0; i < n; i++) {
+                free(matches[i]);
+            }
+            free(matches);
+        }
+    }
+    value("completion.filename_alias",
+          filename_completion_function("__ruline_no_such_file__", 0));
+    value("completion.username_alias",
+          username_completion_function("~__ruline_no_such_user", 0));
+    integer("completion.rewrite_hook.default",
+            rl_completion_rewrite_hook == NULL);
+    integer("completion.directory_hook.default",
+            rl_directory_completion_hook == NULL);
+    integer("completion.ignore_hook.default",
+            rl_ignore_some_completions_function == NULL);
+    {
+        FILE *capture = tmpfile();
+        FILE *saved = rl_outstream;
+        rl_completion_entry_function = generator;
+        rl_completion_suppress_append = 0;
+        rl_replace_line("al", 0);
+        rl_point = rl_end;
+        rl_outstream = capture;
+        integer("export.rc", rl_export_completions(1, 0));
+        rl_outstream = saved;
+        print_capture("export.line", capture);
+        fclose(capture);
+        rl_completion_entry_function = NULL;
+    }
+    {
+        FILE *capture = tmpfile();
+        FILE *saved = rl_outstream;
+        rl_completion_entry_function = generator;
+        rl_replace_line("al", 0);
+        rl_point = rl_end;
+        rl_outstream = capture;
+        integer("export.clear.rc", rl_export_completions(2, 0));
+        rl_outstream = saved;
+        value("export.clear.line", rl_line_buffer);
+        fclose(capture);
+        rl_completion_entry_function = NULL;
+    }
+    {
+        rl_menu_completion_entry_function = generator;
+        rl_last_func = NULL;
+        rl_replace_line("al", 0);
+        rl_point = rl_end;
+        integer("old_menu.first.rc", rl_old_menu_complete(1, 0));
+        value("old_menu.first.line", rl_line_buffer);
+        rl_last_func = rl_old_menu_complete;
+        integer("old_menu.second.rc", rl_old_menu_complete(1, 0));
+        value("old_menu.second.line", rl_line_buffer);
+        rl_last_func = NULL;
+        rl_menu_completion_entry_function = NULL;
+    }
+
+    section("remaining-terminal");
+    integer("timeout.set", rl_set_timeout(1, 0));
+    {
+        unsigned int secs = 99;
+        unsigned int usecs = 99;
+        integer("timeout.remaining_before_read",
+                rl_timeout_remaining(&secs, &usecs));
+        integer("timeout.secs_unchanged", secs == 99);
+    }
+    integer("timeout.clear", rl_set_timeout(0, 0));
+    integer("stuff_char.rc", rl_stuff_char('q'));
+    integer("stuff_char.read", rl_read_key());
+    integer("execute_next.rc", rl_execute_next('r'));
+    integer("execute_next.pending", rl_pending_input);
+    integer("execute_next.read", rl_read_key());
+    integer("execute_next.cleared", rl_pending_input);
+    {
+        FILE *input = tmpfile();
+        fputc('z', input);
+        rewind(input);
+        integer("getc.first", rl_getc(input));
+        integer("getc.eof", rl_getc(input));
+        fclose(input);
+    }
+    integer("paren_blink.old", rl_set_paren_blink_timeout(1234));
+    integer("paren_blink.next", rl_set_paren_blink_timeout(0));
+    value("termcap.unknown", rl_get_termcap("zz"));
+    integer("terminal.reset_rc", rl_reset_terminal(NULL));
+    rl_reparse_colors();
+    rl_echo_signal_char(SIGINT);
+    {
+        Keymap map = rl_get_keymap();
+        rl_tty_set_default_bindings(map);
+        rl_tty_unset_default_bindings(map);
+    }
+
+    section("remaining-signals-hooks");
+    integer("signals.catch", rl_catch_signals);
+    integer("signals.catch_sigwinch", rl_catch_sigwinch);
+    integer("signals.change_environment", rl_change_environment);
+    integer("signals.persistent", rl_persistent_signal_handlers);
+    integer("signals.pending", rl_pending_signal());
+    rl_check_signals();
+    integer("hook.macro_default", rl_macro_display_hook == NULL);
+    integer("hook.signal_event_default", rl_signal_event_hook == NULL);
+    integer("hook.timeout_event_default", rl_timeout_event_hook == NULL);
 
     section("saved-state");
     {

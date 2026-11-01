@@ -256,6 +256,24 @@ pub(crate) fn effective_outstream() -> *mut libc::FILE {
     stream
 }
 
+/// The application's input stream, or stdin before `rl_initialize` has bound
+/// it.
+pub(crate) fn effective_instream() -> *mut libc::FILE {
+    let stream = instream();
+    if stream.is_null() {
+        #[cfg(unix)]
+        {
+            // SAFETY: a plain read of the C standard stream.
+            return unsafe { ptr::addr_of!(stdin).read() };
+        }
+        #[cfg(not(unix))]
+        {
+            return ptr::null_mut();
+        }
+    }
+    stream
+}
+
 pub(crate) fn empty_string() -> *mut c_char {
     EMPTY_STRING.as_ptr() as *mut c_char
 }
@@ -444,10 +462,8 @@ pub struct ReadlineState {
 
 /// GNU `rl_save_state`.  Returns -1 for a NULL destination.
 ///
-/// The signal toggles (`rl_catch_signals`, `rl_catch_sigwinch`) and
-/// `rl_ignore_some_completions_function` are not part of this ABI slice; they
-/// are recorded as zero and left untouched by `rl_restore_state` rather than
-/// guessed.
+/// The signal toggles and `rl_ignore_some_completions_function` are saved and
+/// restored with the rest of the documented process state.
 #[no_mangle]
 pub unsafe extern "C" fn rl_save_state(state: *mut ReadlineState) -> c_int {
     if state.is_null() {
@@ -478,12 +494,12 @@ pub unsafe extern "C" fn rl_save_state(state: *mut ReadlineState) -> c_int {
     destination.outf = outstream();
     destination.macro_ = unsafe { ptr::addr_of!(crate::macros::rl_executing_macro).read() };
 
-    destination.catchsigs = 0;
-    destination.catchsigwinch = 0;
+    destination.catchsigs = unsafe { ptr::addr_of!(crate::terminal::rl_catch_signals).read() };
+    destination.catchsigwinch = unsafe { ptr::addr_of!(crate::terminal::rl_catch_sigwinch).read() };
 
     destination.entryfunc = crate::completion::rl_completion_entry_function;
     destination.menuentryfunc = crate::completion::rl_menu_completion_entry_function;
-    destination.ignorefunc = None;
+    destination.ignorefunc = crate::completion::rl_ignore_some_completions_function;
     destination.attemptfunc = crate::completion::rl_attempted_completion_function;
     destination.wordbreakchars =
         crate::completion::rl_completer_word_break_characters as *const c_char;
@@ -516,6 +532,10 @@ pub unsafe extern "C" fn rl_restore_state(state: *mut ReadlineState) -> c_int {
     set_editing_mode(source.edmode);
     ptr::addr_of_mut!(rl_executing_keyseq).write(source.kseq);
     set_key_sequence_length(source.kseqlen);
+    unsafe {
+        ptr::addr_of_mut!(crate::terminal::rl_catch_signals).write(source.catchsigs);
+        ptr::addr_of_mut!(crate::terminal::rl_catch_sigwinch).write(source.catchsigwinch);
+    }
     set_instream(source.inf);
     set_outstream(source.outf);
     set_pending_input(source.pendingin);
@@ -523,6 +543,7 @@ pub unsafe extern "C" fn rl_restore_state(state: *mut ReadlineState) -> c_int {
 
     crate::completion::rl_completion_entry_function = source.entryfunc;
     crate::completion::rl_menu_completion_entry_function = source.menuentryfunc;
+    crate::completion::rl_ignore_some_completions_function = source.ignorefunc;
     crate::completion::rl_attempted_completion_function = source.attemptfunc;
     crate::completion::rl_completer_word_break_characters = source.wordbreakchars as *mut c_char;
 

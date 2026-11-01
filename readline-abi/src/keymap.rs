@@ -73,6 +73,42 @@ pub static mut vi_insertion_keymap: [KeymapEntry; KEYMAP_SIZE] = [NULL_ENTRY; KE
 #[no_mangle]
 pub static mut vi_movement_keymap: [KeymapEntry; KEYMAP_SIZE] = [NULL_ENTRY; KEYMAP_SIZE];
 
+/// GNU `FUNMAP`: one named bindable command.  The exported `funmap` array is
+/// a NULL-terminated vector of pointers to these entries.
+#[repr(C)]
+pub struct Funmap {
+    pub name: *const c_char,
+    pub function: RlCommandFunc,
+}
+
+/// GNU's public name-to-function map.  Rebuilt whenever an entry is added; the
+/// array and its entries remain valid until the next addition.
+#[no_mangle]
+pub static mut funmap: *mut *mut Funmap = ptr::null_mut();
+
+/// Keymap updated by the binding functions (GNU `bind.c`).
+#[no_mangle]
+pub static mut rl_binding_keymap: Keymap = ptr::null_mut();
+
+/// Keymap in which the currently executing command was found, and the key
+/// that selected it.  The standalone dispatcher seam updates these; readline's
+/// built-in callback dispatcher sets them before invoking a command.
+#[no_mangle]
+pub static mut rl_executing_keymap: Keymap = ptr::null_mut();
+#[no_mangle]
+pub static mut rl_executing_key: c_int = 0;
+
+fn set_binding_keymap(map: Keymap) {
+    unsafe { ptr::addr_of_mut!(rl_binding_keymap).write(map) };
+}
+
+pub(crate) fn set_executing_key(map: Keymap, key: c_int) {
+    unsafe {
+        ptr::addr_of_mut!(rl_executing_keymap).write(map);
+        ptr::addr_of_mut!(rl_executing_key).write(key);
+    }
+}
+
 static EMACS_KEYMAP_NAME: [u8; 6] = *b"emacs\0";
 static EMACS_META_KEYMAP_NAME: [u8; 11] = *b"emacs-meta\0";
 static EMACS_CTLX_KEYMAP_NAME: [u8; 11] = *b"emacs-ctlx\0";
@@ -271,6 +307,12 @@ pub(crate) fn emacs_mode() -> bool {
     matches!(store().editing_mode, EditMode::Emacs)
 }
 
+/// Read whether control characters are echoed as `^X` (GNU's
+/// `_rl_echo_control_chars`, exposed here through the inputrc variable).
+pub(crate) fn echo_control_characters() -> bool {
+    ensure_initialized();
+    bool_value(&store(), "echo-control-characters").unwrap_or(true)
+}
 /// Switch the active editing mode to Emacs and select its standard keymap.
 pub(crate) fn set_emacs_mode() {
     ensure_initialized();
@@ -432,7 +474,50 @@ fn ensure_initialized() {
                 );
             }
         }
+
+        rebuild_funmap(&state);
     });
+}
+
+fn rebuild_funmap(state: &Store) {
+    let count = state.funmap.len();
+    let array_layout = std::mem::size_of::<*mut Funmap>();
+    let array = unsafe { libc::malloc((count + 1) * array_layout) } as *mut *mut Funmap;
+    if array.is_null() {
+        return;
+    }
+
+    for (index, entry) in state.funmap.iter().enumerate() {
+        let item = unsafe { libc::malloc(std::mem::size_of::<Funmap>()) } as *mut Funmap;
+        if item.is_null() {
+            for slot in 0..index {
+                unsafe { libc::free(*array.add(slot) as *mut c_void) };
+            }
+            unsafe { libc::free(array as *mut c_void) };
+            return;
+        }
+        unsafe {
+            (*item).name = entry.name.as_ptr();
+            (*item).function = entry.function;
+            *array.add(index) = item;
+        }
+    }
+    unsafe { *array.add(count) = ptr::null_mut() };
+
+    let previous = unsafe { ptr::addr_of!(funmap).read() };
+    unsafe { ptr::addr_of_mut!(funmap).write(array) };
+    if !previous.is_null() {
+        let mut index = 0usize;
+        loop {
+            let item = unsafe { *previous.add(index) };
+            if item.is_null() {
+                break;
+            }
+            unsafe { libc::free(item as *mut c_void) };
+            index += 1;
+        }
+        unsafe { libc::free(previous as *mut c_void) };
+    }
 }
 
 fn fill_keymap(map: Keymap, bindings: &[(usize, BindTarget)]) {
@@ -976,6 +1061,7 @@ fn bind_key_impl(state: &mut Store, map: Keymap, key: c_int, function: RlCommand
                 entry.r#type = ISFUNC;
                 entry.function = function_to_ptr(function);
             }
+            set_binding_keymap(child);
             return 0;
         }
         let sequence = [ESC as u8, (key & 0x7f) as u8];
@@ -994,6 +1080,7 @@ fn bind_key_impl(state: &mut Store, map: Keymap, key: c_int, function: RlCommand
         free_macro_entry(entry);
         entry.r#type = ISFUNC;
         entry.function = function_to_ptr(function);
+        set_binding_keymap(map);
         return 0;
     }
 
@@ -1059,6 +1146,7 @@ fn generic_bind_keys_impl(
         if key >= KEYMAP_SIZE {
             return -1;
         }
+        set_binding_keymap(current);
         if index > 0 {
             previous_key = *keys.get(index - 1).unwrap_or(&0) as usize;
         }
@@ -2070,7 +2158,9 @@ pub unsafe extern "C" fn rl_add_funmap_entry(
         name: CString::new(name.as_bytes()).unwrap_or_default(),
         function,
     });
-    state.funmap.len() as c_int
+    let count = state.funmap.len() as c_int;
+    rebuild_funmap(&state);
+    count
 }
 
 #[no_mangle]
@@ -2090,6 +2180,7 @@ pub unsafe extern "C" fn rl_add_defun(
         name: CString::new(name.as_bytes()).unwrap_or_default(),
         function,
     });
+    rebuild_funmap(&state);
     0
 }
 
@@ -2215,6 +2306,104 @@ pub unsafe extern "C" fn rl_bind_keyseq_in_map(
         function_to_ptr(function),
         map,
     )
+}
+
+/// Backwards-compatible spelling for `rl_bind_keyseq_in_map`.
+#[no_mangle]
+pub unsafe extern "C" fn rl_set_key(
+    keyseq: *const c_char,
+    function: RlCommandFunc,
+    map: Keymap,
+) -> c_int {
+    rl_bind_keyseq_in_map(keyseq, function, map)
+}
+
+/// Return the index in KEYSEQ following a leading numeric argument, or -1 when
+/// the sequence has no argument (GNU `rl_trim_arg_from_keyseq`).
+#[no_mangle]
+pub unsafe extern "C" fn rl_trim_arg_from_keyseq(
+    keyseq: *const c_char,
+    len: usize,
+    map: Keymap,
+) -> c_int {
+    if keyseq.is_null() {
+        return -1;
+    }
+    ensure_initialized();
+    let state = store();
+    let map0 = if map.is_null() { state.current } else { map };
+    if map0.is_null() {
+        return -1;
+    }
+
+    let digit = function_to_ptr(named_function_impl(&state, b"digit-argument"));
+    let universal = function_to_ptr(named_function_impl(&state, b"universal-argument"));
+    let vi_digit = function_to_ptr(named_function_impl(&state, b"vi-arg-digit"));
+    let bytes = std::slice::from_raw_parts(keyseq as *const u8, len);
+
+    let mut map = map0;
+    let mut index = 0usize;
+    let mut trimmed = 0usize;
+    let mut parsing_digits = 0i32;
+
+    while index < len {
+        let mut ic = bytes[index] as usize;
+
+        if parsing_digits == 2 {
+            if ic == b'-' as usize {
+                trimmed = index + 1;
+                index += 1;
+                continue;
+            }
+            parsing_digits = 1;
+        }
+        if parsing_digits != 0 {
+            if bytes[index].is_ascii_digit() {
+                trimmed = index + 1;
+                index += 1;
+                continue;
+            }
+            parsing_digits = 0;
+        }
+
+        let mut entry = unsafe { *map.add(ic) };
+        if entry.r#type == ISKMAP {
+            let child = entry.function.cast::<KeymapEntry>();
+            if child.is_null() {
+                return -1;
+            }
+            map = child;
+            if index + 1 == len {
+                ic = ANYOTHERKEY;
+            } else {
+                index += 1;
+                continue;
+            }
+            entry = unsafe { *map.add(ic) };
+        }
+
+        if entry.r#type == ISFUNC {
+            if entry.function != digit && entry.function != universal && entry.function != vi_digit
+            {
+                return trimmed as c_int;
+            }
+
+            if index + 1 == len {
+                return -1;
+            }
+
+            parsing_digits = 1;
+            if entry.function == universal || (entry.function == digit && ic == b'-' as usize) {
+                parsing_digits = 2;
+            }
+            map = map0;
+            trimmed = index + 1;
+        }
+
+        index += 1;
+    }
+
+    -1
 }
 
 #[no_mangle]
@@ -2505,7 +2694,33 @@ fn macro_dump(state: &Store, readable: bool) -> Vec<u8> {
                             .to_vec()
                     };
                     let expansion = untranslate_macro_bytes(&macro_bytes);
-                    if readable {
+                    let display_hook =
+                        unsafe { ptr::addr_of!(crate::completion::rl_macro_display_hook).read() };
+                    if display_hook.is_some() {
+                        // GNU hands the application the key name, the escaped
+                        // macro value, the readable flag, and the keymap
+                        // prefix; the hook replaces the default output.
+                        let keyname_c = CString::new(keyname_bytes(key)).unwrap_or_default();
+                        let expansion_c = CString::new(expansion).unwrap_or_default();
+                        let prefix_c = CString::new(prefix.to_vec()).unwrap_or_default();
+                        let prefix_ptr = if prefix.is_empty() {
+                            ptr::null()
+                        } else {
+                            prefix_c.as_ptr()
+                        };
+                        if let Some(hook) = display_hook {
+                            // SAFETY: all strings live for the call; the hook
+                            // follows the published rl_macro_print_func_t ABI.
+                            unsafe {
+                                hook(
+                                    keyname_c.as_ptr(),
+                                    expansion_c.as_ptr(),
+                                    c_int::from(readable),
+                                    prefix_ptr,
+                                );
+                            }
+                        }
+                    } else if readable {
                         output.push(b'"');
                         output.extend_from_slice(&keyname);
                         output.extend_from_slice(b"\": \"");
