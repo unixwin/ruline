@@ -19,6 +19,14 @@
  * libraries. */
 extern int alphabetic(int);
 
+/* GNU's compat.c exports these legacy spellings but its header hides the
+ * declarations behind `#if 0`.  Declare them locally so one source builds
+ * against both libraries. */
+extern void free_undo_list(void);
+extern int maybe_save_line(void);
+extern int maybe_unsave_line(void);
+extern int maybe_replace_line(void);
+
 static void section(const char *name) {
     printf("== %s ==\n", name);
 }
@@ -87,6 +95,9 @@ static int test_command(int count, int key) {
     (void)key;
     return 0;
 }
+
+/* Keep redisplay out of the captured output for commands that repaint. */
+static void noop_redisplay(void) {}
 
 static char *generator(const char *text, int state) {
     static int index;
@@ -312,6 +323,204 @@ int main(void) {
             (rl_readline_state & RL_STATE_OVERWRITE) != 0);
     rl_overwrite_mode(1, 0);
     integer("editing.insert_mode.restored", rl_insert_mode);
+
+    section("undo");
+    rl_free_undo_list();
+    rl_replace_line("abcdef", 0);
+    rl_point = 2;
+    integer("undo.insert.rc", rl_insert_text("XY"));
+    value("undo.insert.line", rl_line_buffer);
+    integer("undo.insert.point", rl_point);
+    integer("undo.insert.what", rl_undo_list != NULL ? rl_undo_list->what : -1);
+    integer("undo.insert.undo", rl_do_undo());
+    value("undo.insert.after", rl_line_buffer);
+    integer("undo.insert.after.point", rl_point);
+    integer("undo.empty", rl_do_undo());
+
+    rl_point = 3;
+    integer("undo.delete.rc", rl_delete_text(1, 3));
+    value("undo.delete.line", rl_line_buffer);
+    integer("undo.delete.undo", rl_do_undo());
+    value("undo.delete.after", rl_line_buffer);
+    integer("undo.delete.after.point", rl_point);
+
+    rl_free_undo_list();
+    rl_replace_line("abc", 0);
+    rl_point = 3;
+    integer("undo.group.begin", rl_begin_undo_group());
+    integer("undo.group.insert1", rl_insert_text("1"));
+    integer("undo.group.insert2", rl_insert_text("2"));
+    integer("undo.group.end", rl_end_undo_group());
+    value("undo.group.line", rl_line_buffer);
+    integer("undo.group.undo", rl_do_undo());
+    value("undo.group.after", rl_line_buffer);
+
+    rl_free_undo_list();
+    rl_replace_line("abc", 0);
+    integer("undo.modifying.rc", rl_modifying(0, 2));
+    integer("undo.modifying.undo", rl_do_undo());
+    value("undo.modifying.line", rl_line_buffer);
+    integer("undo.modifying.point", rl_point);
+
+    rl_free_undo_list();
+    rl_replace_line("abc", 0);
+    rl_point = 3;
+    integer("undo.revert.insert", rl_insert_text("d"));
+    integer("undo.revert.rc", rl_revert_line(1, 0));
+    value("undo.revert.line", rl_line_buffer);
+    integer("undo.command.empty", rl_undo_command(1, 0));
+    integer("undo.command.negative", rl_undo_command(-1, 0));
+
+    rl_free_undo_list();
+    rl_replace_line("original", 0);
+    integer("undo.save.rc", rl_maybe_save_line());
+    rl_replace_line("changed", 0);
+    integer("undo.unsave.rc", rl_maybe_unsave_line());
+    value("undo.unsave.line", rl_line_buffer);
+    integer("undo.unsave.point", rl_point);
+    integer("undo.unsave.again", rl_maybe_unsave_line());
+
+    clear_history();
+    add_history("hist");
+    using_history();
+    history_set_pos(0);
+    rl_replace_line("edited", 0);
+    rl_add_undo(UNDO_BEGIN, 0, 0, NULL);
+    integer("undo.replace.rc", rl_maybe_replace_line());
+    value("undo.replace.history",
+          history_list() != NULL && history_list()[0] != NULL
+              ? history_list()[0]->line
+              : NULL);
+    free_undo_list();
+    integer("undo.free.legacy", rl_undo_list == NULL);
+    clear_history();
+
+    section("char-search");
+    rl_free_undo_list();
+    rl_replace_line("a-b-c-d", 0);
+    rl_point = 0;
+    rl_pending_input = '-';
+    integer("char-search.forward.rc", rl_char_search(2, 0));
+    integer("char-search.forward.point", rl_point);
+    rl_pending_input = '-';
+    integer("char-search.backward.rc", rl_backward_char_search(1, 0));
+    integer("char-search.backward.point", rl_point);
+    rl_point = 6;
+    rl_pending_input = '-';
+    integer("char-search.negative.rc", rl_char_search(-1, 0));
+    integer("char-search.negative.point", rl_point);
+    rl_point = 0;
+    rl_pending_input = 'z';
+    integer("char-search.miss.rc", rl_char_search(1, 0));
+    integer("char-search.miss.point", rl_point);
+
+    section("remaining-text");
+    {
+        rl_voidfunc_t *saved_redisplay = rl_redisplay_function;
+        rl_redisplay_function = noop_redisplay;
+
+        rl_free_undo_list();
+        rl_replace_line("echo ~", 0);
+        rl_point = 6;
+        integer("tilde.rc", rl_tilde_expand(1, 0));
+        value("tilde.line", rl_line_buffer);
+        rl_replace_line("echo ~/src", 0);
+        rl_point = 10;
+        integer("tilde.path.rc", rl_tilde_expand(1, 0));
+        value("tilde.path.line", rl_line_buffer);
+        rl_replace_line("echo plain", 0);
+        rl_point = 10;
+        integer("tilde.plain.rc", rl_tilde_expand(1, 0));
+        value("tilde.plain.line", rl_line_buffer);
+
+        rl_free_undo_list();
+        rl_replace_line("echo hi", 0);
+        rl_point = 0;
+        rl_explicit_arg = 0;
+        integer("comment.rc", rl_insert_comment(1, '#'));
+        value("comment.line", rl_line_buffer);
+        integer("comment.point", rl_point);
+        rl_done = 0;
+        rl_readline_state &= ~RL_STATE_DONE;
+        rl_replace_line("#echo hi", 0);
+        rl_point = 0;
+        rl_explicit_arg = 1;
+        integer("comment.remove.rc", rl_insert_comment(1, '#'));
+        value("comment.remove.line", rl_line_buffer);
+        integer("comment.remove.point", rl_point);
+        rl_done = 0;
+        rl_readline_state &= ~RL_STATE_DONE;
+        rl_explicit_arg = 0;
+
+        rl_replace_line("", 0);
+        rl_point = 0;
+        integer("insert-close.rc", rl_insert_close(1, ')'));
+        value("insert-close.line", rl_line_buffer);
+        integer("insert-close.point", rl_point);
+
+        integer("tty-status.rc", rl_tty_status(1, 0));
+
+        rl_redisplay_function = saved_redisplay;
+    }
+
+    section("yank-args");
+    clear_history();
+    add_history("cmd four five six");
+    add_history("cmd one two three");
+    using_history();
+    rl_free_undo_list();
+    rl_replace_line("", 0);
+    rl_point = 0;
+    rl_explicit_arg = 0;
+    rl_numeric_arg = 1;
+    integer("yank-nth.rc", rl_yank_nth_arg(1, 0));
+    value("yank-nth.line", rl_line_buffer);
+    integer("yank-nth.point", rl_point);
+    integer("yank-nth.mark", rl_mark);
+    rl_replace_line("", 0);
+    rl_point = 0;
+    integer("yank-nth.last.rc", rl_yank_nth_arg('$', 0));
+    value("yank-nth.last.line", rl_line_buffer);
+    rl_replace_line("", 0);
+    rl_point = 0;
+    rl_free_undo_list();
+    rl_last_func = NULL;
+    rl_explicit_arg = 0;
+    rl_numeric_arg = 1;
+    integer("yank-last.rc", rl_yank_last_arg(1, 0));
+    value("yank-last.line", rl_line_buffer);
+    rl_last_func = rl_yank_last_arg;
+    rl_explicit_arg = 0;
+    rl_numeric_arg = 1;
+    integer("yank-last.repeat.rc", rl_yank_last_arg(1, 0));
+    value("yank-last.repeat.line", rl_line_buffer);
+    rl_replace_line("", 0);
+    rl_point = 0;
+    integer("yank-nth.miss.rc", rl_yank_nth_arg(9, 0));
+    value("yank-nth.miss.line", rl_line_buffer);
+    rl_free_undo_list();
+    clear_history();
+
+    section("macro");
+    integer("macro.print.none", rl_print_last_kbd_macro(1, 0));
+    rl_push_macro_input(strdup("abc"));
+    value("macro.executing", rl_executing_macro);
+    integer("macro.state", (rl_readline_state & RL_STATE_MACROINPUT) != 0);
+
+    section("execute-named");
+    {
+        rl_voidfunc_t *saved_redisplay = rl_redisplay_function;
+        rl_redisplay_function = noop_redisplay;
+        rl_replace_line("one two", 0);
+        rl_point = 0;
+        rl_push_macro_input(strdup("forward-word\n"));
+        integer("execute-named.rc", rl_execute_named_command(1, 0));
+        value("execute-named.line", rl_line_buffer);
+        integer("execute-named.point", rl_point);
+        rl_push_macro_input(strdup("no-such-command\n"));
+        integer("execute-named.miss.rc", rl_execute_named_command(1, 0));
+        rl_redisplay_function = saved_redisplay;
+    }
 
     section("keyseq");
     print_keyseq("translate.control", "\\C-x");

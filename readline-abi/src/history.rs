@@ -2253,6 +2253,31 @@ pub unsafe extern "C" fn history_truncate_file(filename: *const c_char, nlines: 
     }
 }
 
+// --- Internal data-pointer maintenance (undo integration) ----------------
+//
+// GNU stores an `UNDO_LIST *` in `HIST_ENTRY.data`.  The undo module has to
+// rewrite those pointers when it frees or advances a list, so expose the
+// equivalent of histlib.c `_hs_replace_history_data` to the crate.
+
+/// Replace every history entry whose `data` pointer equals `old` with `new`.
+pub(crate) unsafe fn replace_history_data(old: *mut c_void, new: *mut c_void) {
+    let mut state = history();
+    for entry in state.entries.iter_mut() {
+        if entry.handle.data == old {
+            entry.handle.data = new;
+        }
+    }
+}
+
+/// Clear the `data` pointer of the entry at the current history offset.
+pub(crate) unsafe fn clear_current_history_data() {
+    let mut state = history();
+    let offset = history_offset_value();
+    if offset >= 0 && (offset as usize) < state.entries.len() {
+        state.entries[offset as usize].handle.data = ptr::null_mut();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1656,6 +1656,226 @@ static int test_history(void) {
     return 0;
 }
 
+static void noop_redisplay(void) {}
+
+static int test_undo_macro_and_remaining_text(void) {
+    rl_voidfunc_t *saved_redisplay;
+    char *macro;
+    HIST_ENTRY **list;
+
+    CHECK(rl_initialize() == 0);
+
+    /* Undo list layout and basic insert/delete replay. */
+    rl_free_undo_list();
+    rl_replace_line("abcdef", 0);
+    rl_point = 2;
+    CHECK(rl_insert_text("XY") == 2);
+    CHECK(strcmp(rl_line_buffer, "abXYcdef") == 0);
+    CHECK(rl_undo_list != NULL);
+    CHECK(rl_undo_list->what == UNDO_INSERT);
+    CHECK(rl_do_undo() == 1);
+    CHECK(strcmp(rl_line_buffer, "abcdef") == 0);
+    CHECK(rl_point == 2);
+    CHECK(rl_do_undo() == 0);
+
+    rl_point = 3;
+    CHECK(rl_delete_text(1, 3) == 2);
+    CHECK(strcmp(rl_line_buffer, "adef") == 0);
+    CHECK(rl_do_undo() == 1);
+    CHECK(strcmp(rl_line_buffer, "abcdef") == 0);
+    CHECK(rl_point == 3);
+
+    /* Groups are undone atomically. */
+    rl_free_undo_list();
+    rl_replace_line("abc", 0);
+    rl_point = 3;
+    CHECK(rl_begin_undo_group() == 0);
+    CHECK(rl_insert_text("1") == 1);
+    CHECK(rl_insert_text("2") == 1);
+    CHECK(rl_end_undo_group() == 0);
+    CHECK(strcmp(rl_line_buffer, "abc12") == 0);
+    CHECK(rl_do_undo() == 1);
+    CHECK(strcmp(rl_line_buffer, "abc") == 0);
+
+    /* rl_modifying records a reversible replace pair. */
+    rl_free_undo_list();
+    rl_replace_line("abc", 0);
+    CHECK(rl_modifying(0, 2) == 0);
+    CHECK(rl_do_undo() == 1);
+    CHECK(strcmp(rl_line_buffer, "abc") == 0);
+    CHECK(rl_point == 2);
+
+    /* revert-line and undo-command. */
+    rl_free_undo_list();
+    rl_replace_line("abc", 0);
+    rl_point = 3;
+    CHECK(rl_insert_text("d") == 1);
+    CHECK(rl_revert_line(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "abc") == 0);
+    CHECK(rl_undo_command(1, 0) == 0);
+
+    /* Saved line helpers and their compat.c spellings. */
+    rl_free_undo_list();
+    rl_replace_line("original", 0);
+    CHECK(rl_maybe_save_line() == 0);
+    rl_replace_line("changed", 0);
+    CHECK(rl_maybe_unsave_line() == 0);
+    CHECK(strcmp(rl_line_buffer, "original") == 0);
+    CHECK(rl_point == 8);
+    CHECK(rl_maybe_unsave_line() == 0);
+    CHECK(maybe_save_line() == 0);
+    CHECK(maybe_unsave_line() == 0);
+    CHECK(maybe_replace_line() == 0);
+
+    /* The current history entry tracks the undo list. */
+    clear_history();
+    add_history("hist");
+    using_history();
+    CHECK(history_set_pos(0) == 1);
+    rl_replace_line("edited", 0);
+    rl_add_undo(UNDO_BEGIN, 0, 0, NULL);
+    CHECK(rl_undo_list != NULL);
+    CHECK(rl_maybe_replace_line() == 0);
+    list = history_list();
+    CHECK(list != NULL && list[0] != NULL);
+    CHECK(strcmp(list[0]->line, "edited") == 0);
+    free_undo_list();
+    CHECK(rl_undo_list == NULL);
+    clear_history();
+
+    /* Character search reads its target from rl_pending_input. */
+    rl_free_undo_list();
+    rl_replace_line("a-b-c-d", 0);
+    rl_point = 0;
+    rl_pending_input = '-';
+    CHECK(rl_char_search(2, 0) == 0);
+    CHECK(rl_point == 3);
+    rl_pending_input = '-';
+    CHECK(rl_backward_char_search(1, 0) == 0);
+    CHECK(rl_point == 1);
+    rl_point = 6;
+    rl_pending_input = '-';
+    CHECK(rl_char_search(-1, 0) == 0);
+    CHECK(rl_point == 5);
+    rl_point = 0;
+    rl_pending_input = 'z';
+    CHECK(rl_char_search(1, 0) == 1);
+    CHECK(rl_point == 0);
+
+    /* Keyboard macro state; capture needs the dispatcher, but the state
+     * machine and replay seam are real. */
+    CHECK(rl_start_kbd_macro(1, 0) == 0);
+    CHECK((rl_readline_state & RL_STATE_MACRODEF) != 0);
+    CHECK(rl_start_kbd_macro(1, 0) == 1);
+    CHECK((rl_readline_state & RL_STATE_MACRODEF) == 0);
+    CHECK(rl_print_last_kbd_macro(1, 0) == 0);
+    CHECK(rl_call_last_kbd_macro(1, 0) == 1);
+    /* Ending without a captured macro aborts (our standalone equivalent of
+     * GNU's longjmp out of the dispatcher). */
+    CHECK(rl_end_kbd_macro(1, 0) == 1);
+
+    macro = strdup("abc");
+    CHECK(macro != NULL);
+    rl_push_macro_input(macro);
+    CHECK(rl_executing_macro != NULL);
+    CHECK(strcmp(rl_executing_macro, "abc") == 0);
+    CHECK((rl_readline_state & RL_STATE_MACROINPUT) != 0);
+
+    /* execute-named-command consumes macro input. */
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    macro = strdup("forward-word\n");
+    CHECK(macro != NULL);
+    rl_push_macro_input(macro);
+    CHECK(rl_execute_named_command(1, 0) == 0);
+    CHECK(rl_point == 3);
+    macro = strdup("no-such-command\n");
+    CHECK(macro != NULL);
+    rl_push_macro_input(macro);
+    CHECK(rl_execute_named_command(1, 0) == 1);
+    CHECK(rl_execute_named_command(1, 0) == 1);
+
+    /* Bracketed paste inserts whatever input source is available. */
+    rl_free_line_state();
+    rl_replace_line("", 0);
+    rl_point = 0;
+    rl_pending_input = 'x';
+    CHECK(rl_bracketed_paste_begin(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "x") == 0);
+    CHECK(rl_paste_from_clipboard(1, 0) == 0);
+
+    /* Comment insertion and close-paren insertion. */
+    saved_redisplay = rl_redisplay_function;
+    rl_redisplay_function = noop_redisplay;
+    rl_free_undo_list();
+    rl_replace_line("echo hi", 0);
+    rl_point = 0;
+    rl_explicit_arg = 0;
+    CHECK(rl_insert_comment(1, '#') == 0);
+    CHECK(strcmp(rl_line_buffer, "#echo hi") == 0);
+    CHECK(rl_point == 1);
+    rl_done = 0;
+    rl_readline_state &= ~RL_STATE_DONE;
+    rl_replace_line("#echo hi", 0);
+    rl_point = 0;
+    rl_explicit_arg = 1;
+    CHECK(rl_insert_comment(1, '#') == 0);
+    CHECK(strcmp(rl_line_buffer, "echo hi") == 0);
+    rl_done = 0;
+    rl_readline_state &= ~RL_STATE_DONE;
+    rl_explicit_arg = 0;
+    rl_replace_line("", 0);
+    rl_point = 0;
+    CHECK(rl_insert_close(1, ')') == 0);
+    CHECK(strcmp(rl_line_buffer, ")") == 0);
+    rl_redisplay_function = saved_redisplay;
+
+    /* Tilde expansion and terminal helpers. */
+    CHECK(setenv("HOME", "/tmp", 1) == 0);
+    rl_free_undo_list();
+    rl_replace_line("echo ~", 0);
+    rl_point = 6;
+    CHECK(rl_tilde_expand(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "echo /tmp") == 0);
+    rl_replace_line("echo ~/src", 0);
+    rl_point = 10;
+    CHECK(rl_tilde_expand(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "echo /tmp/src") == 0);
+    CHECK(rl_restart_output(1, 0) == 0);
+    CHECK(rl_stop_output(1, 0) == 0);
+    CHECK(rl_tty_status(1, 0) == 0);
+
+    /* History-argument yanks. */
+    clear_history();
+    add_history("cmd four five six");
+    add_history("cmd one two three");
+    using_history();
+    rl_free_undo_list();
+    rl_replace_line("", 0);
+    rl_point = 0;
+    CHECK(rl_yank_nth_arg(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "one") == 0);
+    CHECK(rl_point == 3 && rl_mark == 0);
+    rl_replace_line("", 0);
+    rl_point = 0;
+    CHECK(rl_yank_nth_arg('$', 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "three") == 0);
+    rl_replace_line("", 0);
+    rl_point = 0;
+    rl_free_undo_list();
+    CHECK(rl_yank_last_arg(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "three") == 0);
+    CHECK(rl_yank_last_arg(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "six") == 0);
+    rl_replace_line("", 0);
+    rl_point = 0;
+    CHECK(rl_yank_nth_arg(9, 0) == 1);
+    clear_history();
+    rl_free_undo_list();
+
+    return 0;
+}
+
 int main(void) {
     if (test_state_and_text() != 0) {
         return 1;
@@ -1682,6 +1902,9 @@ int main(void) {
         return 1;
     }
     if (test_callback_signals() != 0) {
+        return 1;
+    }
+    if (test_undo_macro_and_remaining_text() != 0) {
         return 1;
     }
     puts("readline ABI smoke test: OK");

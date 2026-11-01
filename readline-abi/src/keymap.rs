@@ -279,6 +279,25 @@ pub(crate) fn set_emacs_mode() {
     state.current = standard_keymap_ptr();
 }
 
+/// Read a boolean inputrc variable without exposing the internal store.
+pub(crate) fn variable_boolean(name: &str) -> bool {
+    ensure_initialized();
+    let state = store();
+    bool_value(&state, name).unwrap_or(false)
+}
+
+/// Copy a string-valued inputrc variable into owned bytes.
+pub(crate) fn variable_value_bytes(name: &str) -> Option<Vec<u8>> {
+    ensure_initialized();
+    let mut state = store();
+    let pointer = variable_value_impl(&mut state, name);
+    if pointer.is_null() {
+        None
+    } else {
+        Some(c_bytes(pointer).to_vec())
+    }
+}
+
 fn ensure_initialized() {
     INIT.call_once(|| {
         fill_keymap(standard_keymap_ptr(), EMACS_STANDARD_KEYMAP_BINDINGS);
