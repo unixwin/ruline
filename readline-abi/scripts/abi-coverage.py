@@ -1009,6 +1009,17 @@ def main() -> int:
         action="store_true",
         help="run `cargo build -p readline-abi --release` when the library is missing",
     )
+    parser.add_argument(
+        "--require-full",
+        action="store_true",
+        help="fail unless every GNU-spec symbol is implemented",
+    )
+    parser.add_argument(
+        "--min-coverage",
+        type=float,
+        metavar="PERCENT",
+        help="fail when overall coverage is below PERCENT",
+    )
     args = parser.parse_args()
 
     vendor = vendor_directory(args.vendor)
@@ -1063,6 +1074,23 @@ def main() -> int:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(rendered, encoding="utf-8")
             print(f"wrote {path}", file=sys.stderr)
+
+    if args.require_full and coverage.missing:
+        print(
+            f"error: ABI is not complete: {len(coverage.missing)} GNU-spec symbols missing",
+            file=sys.stderr,
+        )
+        return 1
+    if args.min_coverage is not None:
+        total = len(coverage.spec)
+        implemented = total - len(coverage.missing)
+        percent = (implemented * 100.0 / total) if total else 0.0
+        if percent + 1e-9 < args.min_coverage:
+            print(
+                f"error: ABI coverage {percent:.1f}% is below the {args.min_coverage:.1f}% gate",
+                file=sys.stderr,
+            )
+            return 1
 
     has_drift = any(coverage.diagnostics.values())
     return 1 if has_drift else 0

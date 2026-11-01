@@ -63,9 +63,13 @@ The readline ABI is being built in slices (tracker
 - [ ] plugin acceptance (`enable -f`, ble.sh, fzf, bash-completion) — [#7](https://github.com/unixwin/ruline/issues/7)
 - [ ] default-keymap parity burn-down — [#5](https://github.com/unixwin/ruline/issues/5)
 
-`readline-abi` exports 186 symbols today. The coverage audit against the
-vendored GNU headers tracks the remaining GNU API and will drive the
-implementation to full coverage.
+`readline-abi` exports 274 symbols today (62.2% of the GNU-spec surface). The
+coverage audit against the vendored GNU headers tracks the remaining API and
+drives the implementation to full coverage. The hard definition-of-done gates
+— coverage, GNU differential conformance, plugin matrix, tests and
+performance — are in [`COMPATIBILITY.md`](./COMPATIBILITY.md). The project
+does not claim 100% compatibility until every gate is green on the same
+commit.
 
 ## Independence, license and thanks
 
