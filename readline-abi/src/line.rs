@@ -9,6 +9,7 @@ use crate::state;
 
 pub(crate) const RL_STATE_INITIALIZING: std::os::raw::c_ulong = 0x0000_0001;
 pub(crate) const RL_STATE_INITIALIZED: std::os::raw::c_ulong = 0x0000_0002;
+pub(crate) const RL_STATE_COMPLETING: std::os::raw::c_ulong = 0x0000_4000;
 pub(crate) const RL_STATE_DONE: std::os::raw::c_ulong = 0x0200_0000;
 pub(crate) const RL_STATE_EOF: std::os::raw::c_ulong = 0x0800_0000;
 
@@ -116,6 +117,7 @@ pub unsafe extern "C" fn rl_initialize() -> c_int {
 
     initialize_line_state();
     initialize_state_bits();
+    crate::completion::initialize_defaults();
 
     0
 }
@@ -323,7 +325,9 @@ pub unsafe extern "C" fn rl_redisplay() {
 #[no_mangle]
 pub unsafe extern "C" fn rl_forced_update_display() -> c_int {
     rl_on_new_line();
-    rl_redisplay();
+    // GNU routes forced repaints through rl_redisplay_function when the
+    // application installed one, falling back to rl_redisplay.
+    crate::completion::redisplay_with_hook();
     0
 }
 
@@ -335,7 +339,7 @@ pub unsafe extern "C" fn rl_clear_message() -> c_int {
     } else {
         prompt
     });
-    rl_redisplay();
+    crate::completion::redisplay_with_hook();
     0
 }
 
