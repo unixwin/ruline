@@ -186,11 +186,12 @@ Reedline's default when no edit mode is configured. All four
 | `Ctrl-u` | Cut from the start of the line to the cursor |
 | `Ctrl-y` | Paste the cut buffer before the cursor |
 | `Ctrl-t` | Swap the two graphemes around the cursor |
-| `Ctrl-z` | Undo |
-| `Ctrl-g` | Redo |
-| `Alt-u` | Uppercase the whole word under the cursor |
-| `Alt-l` | Lowercase the whole word under the cursor |
-| `Alt-c` | Capitalize the grapheme under the cursor |
+| `Ctrl-_` | Undo the previous edit |
+| `Ctrl-z` | Suspend the editor (GNU `rl_suspend`) |
+| `Alt-u` | Uppercase the word at point |
+| `Alt-l` | Lowercase the word at point |
+| `Alt-c` | Capitalize the word at point, leaving point at its end |
+| `Alt-t` | Transpose the two words around point (at end of line, the last two) |
 
 ## Vi mode
 

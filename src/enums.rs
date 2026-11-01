@@ -692,8 +692,9 @@ pub enum EditCommand {
     /// Lower case the current word
     LowercaseWord,
 
-    /// Capitalize the current word: upper case its first character and
-    /// leave the rest untouched (GNU readline `capitalize-word`, M-c)
+    /// Capitalize the word at point: upper case its first alphanumeric
+    /// character and lower case the rest, landing point at the word's
+    /// end (GNU readline `capitalize-word`, M-c, text.c:1447)
     CapitalizeWord,
 
     /// Capitalize the current character
@@ -702,7 +703,9 @@ pub enum EditCommand {
     /// Switch the case of the current character
     SwitchcaseChar,
 
-    /// Swap the current word with the word to the right
+    /// Transpose the two words around point, leaving point on the
+    /// second word's end (GNU readline `transpose-words`, M-t,
+    /// text.c:1592)
     SwapWords,
 
     /// Deletes all whitespace around the insertion point (readline
