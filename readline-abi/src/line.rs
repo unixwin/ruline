@@ -28,7 +28,7 @@ fn duplicate(value: *const c_char) -> *mut c_char {
         ptr::null_mut()
     } else {
         // SAFETY: value is a NUL-terminated string supplied by the caller.
-        unsafe { libc::strdup(value) }
+        unsafe { crate::misc_text::strdup(value) }
     }
 }
 

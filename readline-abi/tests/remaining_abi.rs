@@ -118,7 +118,7 @@ extern "C" fn directory_completion_hook(dirname: *mut *mut c_char) -> c_int {
         if !(*dirname).is_null() {
             libc::free(*dirname as *mut libc::c_void);
         }
-        *dirname = libc::strdup(replacement.as_ptr());
+        *dirname = strdup(replacement.as_bytes());
     }
     1
 }

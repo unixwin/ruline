@@ -8,7 +8,9 @@
 //! * `rl_restart_output` / `rl_stop_output` drive `tcflow` on the standard
 //!   streams, matching rltty.c's POSIX path.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
+#[cfg(unix)]
+use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 
 use crate::state;
@@ -64,7 +66,11 @@ fn home_directory() -> Vec<u8> {
         #[cfg(not(unix))]
         return home.to_string_lossy().into_owned().into_bytes();
     }
+    passwd_home_directory()
+}
 
+#[cfg(unix)]
+fn passwd_home_directory() -> Vec<u8> {
     // SAFETY: getpwuid returns a process-owned passwd record or NULL.
     unsafe {
         let entry = libc::getpwuid(libc::getuid());
@@ -76,7 +82,16 @@ fn home_directory() -> Vec<u8> {
     }
 }
 
-fn user_home(name: &[u8]) -> Option<Vec<u8>> {
+#[cfg(not(unix))]
+fn passwd_home_directory() -> Vec<u8> {
+    // No passwd database: the profile directory is the user's home.
+    std::env::var_os("USERPROFILE")
+        .map(|value| value.to_string_lossy().into_owned().into_bytes())
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+pub(crate) fn user_home(name: &[u8]) -> Option<Vec<u8>> {
     let name = CString::new(name).ok()?;
     // SAFETY: getpwnam returns a process-owned passwd record or NULL.  The
     // bytes are copied before another lookup can overwrite the record.
@@ -88,6 +103,28 @@ fn user_home(name: &[u8]) -> Option<Vec<u8>> {
             Some(CStr::from_ptr((*entry).pw_dir).to_bytes().to_vec())
         }
     }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn user_home(_name: &[u8]) -> Option<Vec<u8>> {
+    // No passwd database to resolve `~user` against: leave the word alone,
+    // which is what GNU does for an unknown user.
+    None
+}
+
+/// libc `strdup`, written out because MSVCRT only exports `_strdup`: the
+/// allocation must stay paired with the crate's `libc::free` calls.
+///
+/// # SAFETY
+/// `src` must point to a NUL-terminated string. The result is released with
+/// `libc::free`.
+pub(crate) unsafe fn strdup(src: *const c_char) -> *mut c_char {
+    let bytes = CStr::from_ptr(src).to_bytes_with_nul().len();
+    let copy = libc::malloc(bytes) as *mut c_char;
+    if !copy.is_null() {
+        std::ptr::copy_nonoverlapping(src.cast::<u8>(), copy.cast::<u8>(), bytes);
+    }
+    copy
 }
 
 /// Port of `tilde_expand_word` for the cases the line editor can encounter:
@@ -270,19 +307,27 @@ pub unsafe extern "C" fn rl_tty_status(_count: c_int, _key: c_int) -> c_int {
 }
 
 /// Resume terminal output (`^Q`): GNU's rltty.c POSIX path is
-/// `tcflow (fileno (rl_outstream), TCOON)`.
+/// `tcflow (fileno (rl_outstream), TCOON)`.  A Windows console has no
+/// termios flow control, so the key is a no-op there.
 #[no_mangle]
 pub unsafe extern "C" fn rl_restart_output(_count: c_int, _key: c_int) -> c_int {
-    // SAFETY: tcflow is a plain termios call; errors are ignored like GNU.
-    unsafe { libc::tcflow(libc::STDOUT_FILENO, libc::TCOON) };
+    #[cfg(unix)]
+    {
+        // SAFETY: tcflow is a plain termios call; errors are ignored like GNU.
+        unsafe { libc::tcflow(libc::STDOUT_FILENO, libc::TCOON) };
+    }
     0
 }
 
 /// Suspend terminal output (`^S`): `tcflow (fileno (rl_instream), TCOOFF)`.
+/// No-op on Windows for the same reason as `rl_restart_output`.
 #[no_mangle]
 pub unsafe extern "C" fn rl_stop_output(_count: c_int, _key: c_int) -> c_int {
-    // SAFETY: tcflow is a plain termios call; errors are ignored like GNU.
-    unsafe { libc::tcflow(libc::STDIN_FILENO, libc::TCOOFF) };
+    #[cfg(unix)]
+    {
+        // SAFETY: tcflow is a plain termios call; errors are ignored like GNU.
+        unsafe { libc::tcflow(libc::STDIN_FILENO, libc::TCOOFF) };
+    }
     0
 }
 
