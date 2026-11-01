@@ -1687,6 +1687,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(not(unix))]
 trait OsStrExt {
     fn from_bytes(bytes: &[u8]) -> &OsStr;
+    fn as_bytes(&self) -> &[u8];
 }
 
 #[cfg(not(unix))]
@@ -1694,6 +1695,12 @@ impl OsStrExt for OsStr {
     fn from_bytes(bytes: &[u8]) -> &OsStr {
         // The ABI passes bytes; non-Unix targets get a lossy view.
         OsStr::new(std::str::from_utf8(bytes).unwrap_or(""))
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        // The encoded form is the raw bytes on Unix and WTF-8 elsewhere; an
+        // init-file path only round-trips through `from_bytes` above.
+        self.as_encoded_bytes()
     }
 }
 

@@ -613,7 +613,7 @@ mod tests {
         let text = CString::new(text).unwrap();
         // SAFETY: strdup returns libc storage, which is what the macro stack
         // frees.
-        unsafe { libc::strdup(text.as_ptr()) }
+        unsafe { crate::misc_text::strdup(text.as_ptr()) }
     }
 
     #[test]

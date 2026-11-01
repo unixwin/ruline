@@ -10,6 +10,16 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_int;
 use std::sync::{Mutex, MutexGuard};
 
+// MSVCRT exports the POSIX strdup under its underscored CRT name; alias it so
+// the malloc-backed ownership contract the ABI expects still holds.
+#[cfg(windows)]
+extern "C" {
+    #[link_name = "_strdup"]
+    fn strdup(value: *const std::os::raw::c_char) -> *mut std::os::raw::c_char;
+}
+#[cfg(not(windows))]
+use libc::strdup;
+
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 const RL_STATE_MACROINPUT: std::os::raw::c_ulong = 0x0000_0800;
@@ -249,7 +259,7 @@ fn macro_state_print_and_push_input() {
 
     let text = CString::new("abc").unwrap();
     // SAFETY: rl_push_macro_input takes ownership of malloc storage.
-    let owned = unsafe { libc::strdup(text.as_ptr()) };
+    let owned = unsafe { strdup(text.as_ptr()) };
     unsafe { readline::rl_push_macro_input(owned) };
     assert_eq!(
         unsafe { CStr::from_ptr(readline::rl_executing_macro) }
@@ -272,7 +282,7 @@ fn execute_named_command_uses_macro_input() {
     set_point(0);
     let name = CString::new("forward-word\n").unwrap();
     unsafe {
-        let owned = libc::strdup(name.as_ptr());
+        let owned = strdup(name.as_ptr());
         readline::rl_push_macro_input(owned);
     }
     assert_eq!(unsafe { readline::rl_execute_named_command(1, 0) }, 0);
@@ -280,7 +290,7 @@ fn execute_named_command_uses_macro_input() {
 
     let missing = CString::new("no-such-command\n").unwrap();
     unsafe {
-        let owned = libc::strdup(missing.as_ptr());
+        let owned = strdup(missing.as_ptr());
         readline::rl_push_macro_input(owned);
     }
     assert_eq!(unsafe { readline::rl_execute_named_command(1, 0) }, 1);

@@ -19,7 +19,7 @@
 //! fed by the exported line primitives, so `u` undoes exactly the text that a
 //! vi delete/insert/change unit changed, including GNU's cursor placement.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -1562,16 +1562,7 @@ fn expand_tilde(word: &[u8]) -> Option<Vec<u8>> {
     let home = if user.is_empty() {
         std::env::var_os("HOME").map(|value| value.as_encoded_bytes().to_vec())?
     } else {
-        let name = CString::new(user).ok()?;
-        // SAFETY: `getpwnam` takes a NUL-terminated user name.
-        let entry = unsafe { libc::getpwnam(name.as_ptr()) };
-        if entry.is_null() || unsafe { (*entry).pw_dir }.is_null() {
-            return None;
-        }
-        // SAFETY: `pw_dir` is a NUL-terminated string owned by libc.
-        unsafe { CStr::from_ptr((*entry).pw_dir) }
-            .to_bytes()
-            .to_vec()
+        crate::misc_text::user_home(user)?
     };
 
     let mut expanded = home;

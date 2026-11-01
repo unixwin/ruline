@@ -61,7 +61,7 @@ fn prompt_text() -> String {
 
 fn into_c_string(value: String) -> *mut c_char {
     match CString::new(value) {
-        Ok(value) => unsafe { libc::strdup(value.as_ptr()) },
+        Ok(value) => unsafe { crate::misc_text::strdup(value.as_ptr()) },
         Err(_) => ptr::null_mut(),
     }
 }

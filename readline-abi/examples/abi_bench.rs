@@ -16,6 +16,7 @@
 //! `ops/sample` is the number of operations inside each timed sample; it is
 //! there to make it clear that e.g. "history add 10k" amortises one setup and
 //! 10,000 `add_history` calls.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::ffi::{CStr, CString};
 use std::fs;
@@ -40,6 +41,9 @@ struct Api {
     handle: *mut c_void,
 }
 
+// dlopen/dlsym are POSIX dl; a Windows bench would need LoadLibrary and is
+// out of scope here.
+#[cfg(unix)]
 impl Api {
     unsafe fn open(path: &Path) -> Result<Self, String> {
         let canonical =
@@ -83,6 +87,7 @@ impl Api {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Api {
     fn drop(&mut self) {
         unsafe { libc::dlclose(self.handle) };
@@ -292,6 +297,7 @@ fn default_library() -> PathBuf {
 
 // --- Main -----------------------------------------------------------------
 
+#[cfg(unix)]
 fn main() {
     let mut samples = std::env::var("BENCH_SAMPLES")
         .ok()
@@ -701,4 +707,9 @@ fn human_count(value: usize) -> String {
     } else {
         value.to_string()
     }
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("abi_bench: dlopen-based harness, unix only");
 }
