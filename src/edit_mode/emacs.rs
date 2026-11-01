@@ -146,7 +146,12 @@ pub fn default_emacs_keybindings() -> Keybindings {
     // engine's `last_history` models by leaving history traversal.
     kb.add_binding(KM::ALT, KC::Char('<'), ReedlineEvent::FirstHistoryEntry);
     kb.add_binding(KM::ALT, KC::Char('>'), ReedlineEvent::LastHistoryEntry);
-    // For kitty keyboard protocol
+    // The shifted-glyph spellings terminals report. kitty names the base
+    // key: Shift+Alt+','/'.'. ConPTY pre-combines the ESC prefix into the
+    // INPUT_RECORD and keeps the SHIFT it took to reach the glyph, so the
+    // same press surfaces as Shift+Alt+'<'/'>' (measured with a ConPTY
+    // key probe). '<'/'>' have no case, so SHIFT is only the physical
+    // key's case marker there.
     kb.add_binding(
         KM::SHIFT | KM::ALT,
         KC::Char(','),
@@ -155,6 +160,16 @@ pub fn default_emacs_keybindings() -> Keybindings {
     kb.add_binding(
         KM::SHIFT | KM::ALT,
         KC::Char('.'),
+        ReedlineEvent::LastHistoryEntry,
+    );
+    kb.add_binding(
+        KM::SHIFT | KM::ALT,
+        KC::Char('<'),
+        ReedlineEvent::FirstHistoryEntry,
+    );
+    kb.add_binding(
+        KM::SHIFT | KM::ALT,
+        KC::Char('>'),
         ReedlineEvent::LastHistoryEntry,
     );
 
@@ -756,6 +771,17 @@ mod test {
         );
         assert_eq!(
             kb.find_binding(KeyModifiers::SHIFT | KeyModifiers::ALT, KeyCode::Char('.')),
+            Some(ReedlineEvent::LastHistoryEntry)
+        );
+        // ConPTY pre-combines the ESC prefix and keeps the SHIFT it took
+        // to reach the glyph, so M-< surfaces as Shift+Alt+'<' (measured
+        // with a ConPTY key probe: `\x1b<` -> Char('<') SHIFT|ALT).
+        assert_eq!(
+            kb.find_binding(KeyModifiers::SHIFT | KeyModifiers::ALT, KeyCode::Char('<')),
+            Some(ReedlineEvent::FirstHistoryEntry)
+        );
+        assert_eq!(
+            kb.find_binding(KeyModifiers::SHIFT | KeyModifiers::ALT, KeyCode::Char('>')),
             Some(ReedlineEvent::LastHistoryEntry)
         );
         // GNU's vi maps do not bind them; neither do ours.
