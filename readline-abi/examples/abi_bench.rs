@@ -217,7 +217,7 @@ fn print_row(name: &str, stats: &Stats) {
 // --- Completion generator -------------------------------------------------
 
 unsafe extern "C" fn candidate_generator(_text: *const c_char, state: c_int) -> *mut c_char {
-    if state < 0 || state >= COMPLETION_CANDIDATES {
+    if !(0..COMPLETION_CANDIDATES).contains(&state) {
         return ptr::null_mut();
     }
     // Allocate with libc: readline frees generator results with free(3).
@@ -688,7 +688,7 @@ fn main() {
 }
 
 fn human_bytes(value: usize) -> String {
-    if value >= 1024 && value % 1024 == 0 {
+    if value >= 1024 && value.is_multiple_of(1024) {
         format!("{} KiB", value / 1024)
     } else {
         format!("{value} B")
@@ -696,7 +696,7 @@ fn human_bytes(value: usize) -> String {
 }
 
 fn human_count(value: usize) -> String {
-    if value >= 1000 && value % 1000 == 0 {
+    if value >= 1000 && value.is_multiple_of(1000) {
         format!("{}k", value / 1000)
     } else {
         value.to_string()

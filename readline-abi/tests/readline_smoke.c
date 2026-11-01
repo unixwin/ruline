@@ -599,7 +599,8 @@ static int test_state_and_text(void) {
     rl_replace_line("abc", 0);
     rl_point = 1;
     rl_mark = 2;
-    CHECK(rl_kill_text(0, 1) == 1);
+    /* GNU's rl_kill_text saves the text on the kill ring and returns 0. */
+    CHECK(rl_kill_text(0, 1) == 0);
     CHECK(rl_end == 2);
     CHECK(strcmp(rl_line_buffer, "bc") == 0);
     CHECK(rl_mark <= rl_end);
@@ -634,6 +635,18 @@ static int test_state_and_text(void) {
     rl_free_line_state();
 
     return 0;
+}
+
+/* GNU rl_function_of_keyseq takes RAW key bytes, not a bind spelling.
+ * Translate first; this is what the ABI contract requires. */
+static rl_command_func_t *lookup_keyseq(const char *spelling, Keymap map, int *type) {
+    char raw[128];
+    int length = -1;
+    if (rl_translate_keyseq(spelling, raw, &length) != 0 || length < 0) {
+        return NULL;
+    }
+    raw[length] = '\0';
+    return rl_function_of_keyseq(raw, map, type);
 }
 
 static int keymap_test_command(int count, int key) {
@@ -687,9 +700,9 @@ static int test_keymap_and_binding(void) {
 
     function = rl_named_function("beginning-of-line");
     CHECK(function != NULL);
-    CHECK(rl_function_of_keyseq("\\C-a", emacs_standard_keymap, &type) == function);
+    CHECK(lookup_keyseq("\\C-a", emacs_standard_keymap, &type) == function);
     CHECK(type == ISFUNC);
-    CHECK(rl_function_of_keyseq("\001", emacs_standard_keymap, &type) == function);
+    CHECK(lookup_keyseq("\001", emacs_standard_keymap, &type) == function);
     CHECK(rl_named_function("BEGINNING-OF-LINE") == function);
     CHECK(rl_named_function("no-such-function") == NULL);
 
@@ -697,7 +710,7 @@ static int test_keymap_and_binding(void) {
     CHECK(rl_named_function("ruline-test-command") == keymap_test_command);
 
     CHECK(rl_bind_keyseq("\\C-xy", keymap_test_command) == 0);
-    CHECK(rl_function_of_keyseq("\\C-xy", NULL, &type) == keymap_test_command);
+    CHECK(lookup_keyseq("\\C-xy", NULL, &type) == keymap_test_command);
     CHECK(type == ISFUNC);
 
     sequences = rl_invoking_keyseqs(keymap_test_command);
@@ -713,12 +726,12 @@ static int test_keymap_and_binding(void) {
     CHECK(found);
 
     CHECK(rl_parse_and_bind("\"\\C-x\\C-r\": re-read-init-file") == 0);
-    CHECK(rl_function_of_keyseq("\\C-x\\C-r", NULL, &type) ==
+    CHECK(lookup_keyseq("\\C-x\\C-r", NULL, &type) ==
           rl_named_function("re-read-init-file"));
     CHECK(type == ISFUNC);
 
     CHECK(rl_parse_and_bind("\"\\C-xm\": \"hi\"") == 0);
-    function = rl_function_of_keyseq("\\C-xm", NULL, &type);
+    function = lookup_keyseq("\\C-xm", NULL, &type);
     CHECK(type == ISMACR);
     CHECK(function != NULL);
     {
@@ -741,13 +754,18 @@ static int test_keymap_and_binding(void) {
     CHECK(rl_translate_keyseq("\\e[1;5C", buffer, &length) == 0);
     CHECK(length == 6);
     CHECK(memcmp(buffer, "\033[1;5C", 6) == 0);
+    /* GNU rl_translate_keyseq does not implement caret notation or strip
+     * quotes; the bind/inputrc parser handles those before translation. */
     CHECK(rl_translate_keyseq("^?", buffer, &length) == 0);
-    CHECK(length == 1);
-    CHECK((unsigned char)buffer[0] == 0x7f);
-    CHECK(rl_translate_keyseq("\"\\C-x\\C-r\"", buffer, &length) == 0);
     CHECK(length == 2);
-    CHECK(buffer[0] == 0x18);
-    CHECK(buffer[1] == 0x12);
+    CHECK(buffer[0] == '^');
+    CHECK(buffer[1] == '?');
+    CHECK(rl_translate_keyseq("\"\\C-x\\C-r\"", buffer, &length) == 0);
+    CHECK(length == 4);
+    CHECK(buffer[0] == '"');
+    CHECK(buffer[1] == 0x18);
+    CHECK(buffer[2] == 0x12);
+    CHECK(buffer[3] == '"');
 
     CHECK(strcmp(rl_variable_value("convert-meta"), "on") == 0);
     CHECK(rl_variable_bind("convert-meta", "off") == 0);
@@ -798,15 +816,234 @@ static int test_keymap_and_binding(void) {
     fclose(file);
 
     CHECK(rl_read_init_file(path) == 0);
-    CHECK(rl_function_of_keyseq("\\C-xt", NULL, &type) ==
+    CHECK(lookup_keyseq("\\C-xt", NULL, &type) ==
           rl_named_function("transpose-chars"));
-    CHECK(rl_function_of_keyseq("\\C-xd", NULL, &type) ==
+    CHECK(lookup_keyseq("\\C-xd", NULL, &type) ==
           rl_named_function("dump-functions"));
     CHECK(rl_re_read_init_file(0, 0) == 0);
     unlink(path);
 
     rl_print_keybinding("ruline-test-command", emacs_standard_keymap, 1);
     rl_print_keybinding("ruline-test-command", emacs_standard_keymap, 0);
+    return 0;
+}
+
+/* Invoke a bindable command resolved through the funmap. */
+static int call_command(int line, const char *name, int count, int key) {
+    rl_command_func_t *function = rl_named_function(name);
+    if (function == NULL) {
+        fprintf(stderr, "FAIL %s:%d: no command named %s\n", __FILE__, line,
+                name);
+        return 1;
+    }
+    return function(count, key);
+}
+
+static int test_editing_commands(void) {
+    rl_command_func_t *forward;
+    rl_command_func_t *alias;
+
+    CHECK(rl_initialize() == 0);
+    rl_replace_line("", 0);
+
+    /* self-insert uses the dispatched key. */
+    CHECK(call_command(__LINE__, "self-insert", 1, 'a') == 0);
+    CHECK(call_command(__LINE__, "self-insert", 1, 'b') == 0);
+    CHECK(call_command(__LINE__, "self-insert", 1, 'c') == 0);
+    CHECK(strcmp(rl_line_buffer, "abc") == 0);
+    CHECK(rl_point == 3 && rl_end == 3);
+
+    /* Character and line movement. */
+    CHECK(call_command(__LINE__, "backward-char", 1, 0) == 0);
+    CHECK(rl_point == 2);
+    CHECK(call_command(__LINE__, "forward-char", 1, 0) == 0);
+    CHECK(rl_point == 3);
+    CHECK(call_command(__LINE__, "beginning-of-line", 1, 0) == 0);
+    CHECK(rl_point == 0);
+    CHECK(call_command(__LINE__, "end-of-line", 1, 0) == 0);
+    CHECK(rl_point == 3);
+
+    /* Word movement follows GNU's alphabetic boundaries. */
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    CHECK(call_command(__LINE__, "forward-word", 1, 0) == 0);
+    CHECK(rl_point == 3);
+    CHECK(call_command(__LINE__, "forward-word", 1, 0) == 0);
+    CHECK(rl_point == 7);
+    CHECK(call_command(__LINE__, "backward-word", 1, 0) == 0);
+    CHECK(rl_point == 4);
+
+    /* Mark, explicit set-mark count, and exchange. */
+    rl_replace_line("hello", 0);
+    rl_point = 2;
+    CHECK(call_command(__LINE__, "set-mark", 1, 0) == 0);
+    CHECK(rl_mark == 2);
+    rl_explicit_arg = 1;
+    CHECK(call_command(__LINE__, "set-mark", 0, 0) == 0);
+    CHECK(rl_mark == 0);
+    CHECK(rl_explicit_arg == 0);
+    CHECK(call_command(__LINE__, "exchange-point-and-mark", 1, 0) == 0);
+    CHECK(rl_point == 0 && rl_mark == 2);
+    CHECK(call_command(__LINE__, "exchange-point-and-mark", 1, 0) == 0);
+    CHECK(rl_point == 2 && rl_mark == 0);
+
+    /* Delete-char and backward-delete-char. */
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    CHECK(call_command(__LINE__, "delete-char", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "ac") == 0);
+    CHECK(rl_point == 1);
+    CHECK(call_command(__LINE__, "backward-delete-char", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "c") == 0);
+    CHECK(rl_point == 0);
+    CHECK(call_command(__LINE__, "backward-delete-char", 1, 0) == 1);
+    CHECK(call_command(__LINE__, "delete-char", 1, 0) == 0);
+    CHECK(rl_end == 0);
+
+    /* delete-horizontal-space removes surrounding spaces and tabs. */
+    rl_replace_line("a  \t b", 0);
+    rl_point = 4;
+    CHECK(call_command(__LINE__, "delete-horizontal-space", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "ab") == 0);
+    CHECK(rl_point == 1);
+
+    /* kill-line and yank round-trip. */
+    rl_replace_line("hello world", 0);
+    rl_point = 5;
+    rl_mark = 0;
+    CHECK(call_command(__LINE__, "kill-line", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "hello") == 0);
+    CHECK(rl_point == 5);
+    CHECK(call_command(__LINE__, "yank", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "hello world") == 0);
+    CHECK(rl_point == 11);
+
+    /* Two separate kills, then yank-pop rotates to the older entry. */
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    CHECK(call_command(__LINE__, "kill-word", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, " two") == 0);
+    CHECK(call_command(__LINE__, "self-insert", 1, 'x') == 0);
+    rl_replace_line("three four", 0);
+    rl_point = 0;
+    CHECK(call_command(__LINE__, "kill-word", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, " four") == 0);
+    CHECK(call_command(__LINE__, "yank", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "three four") == 0);
+    CHECK(call_command(__LINE__, "yank-pop", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "one four") == 0);
+
+    /* Unix-style rubouts and whole-line/region kills. */
+    rl_replace_line("foo bar", 0);
+    rl_point = 7;
+    CHECK(call_command(__LINE__, "unix-word-rubout", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "foo ") == 0);
+    CHECK(rl_point == 4);
+
+    rl_replace_line("abc", 0);
+    rl_point = 3;
+    CHECK(call_command(__LINE__, "unix-line-discard", 1, 0) == 0);
+    CHECK(rl_end == 0 && rl_point == 0);
+
+    rl_replace_line("abc", 0);
+    rl_point = 3;
+    CHECK(call_command(__LINE__, "backward-kill-line", 1, 0) == 0);
+    CHECK(rl_end == 0 && rl_point == 0);
+
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    CHECK(call_command(__LINE__, "kill-whole-line", 1, 0) == 0);
+    CHECK(rl_end == 0 && rl_point == 0 && rl_mark == 0);
+
+    rl_replace_line("abcdef", 0);
+    rl_point = 1;
+    rl_mark = 4;
+    CHECK(call_command(__LINE__, "kill-region", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "aef") == 0);
+    CHECK(rl_point == 1);
+
+    /* Transposition. */
+    rl_replace_line("ab", 0);
+    rl_point = 2;
+    CHECK(call_command(__LINE__, "transpose-chars", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "ba") == 0);
+    CHECK(rl_point == 2);
+
+    /* Case changes. */
+    rl_replace_line("hello world", 0);
+    rl_point = 0;
+    CHECK(call_command(__LINE__, "upcase-word", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "HELLO world") == 0);
+    CHECK(rl_point == 5);
+
+    rl_replace_line("HELLO WORLD", 0);
+    rl_point = 0;
+    CHECK(call_command(__LINE__, "downcase-word", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "hello WORLD") == 0);
+
+    rl_replace_line("hello wORLD", 0);
+    rl_point = 0;
+    CHECK(call_command(__LINE__, "capitalize-word", 2, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "Hello World") == 0);
+    CHECK(rl_point == 11);
+
+    /* Overwrite mode toggles the flag and overwrites on self-insert. */
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    CHECK(call_command(__LINE__, "overwrite-mode", 1, 0) == 0);
+    CHECK(rl_insert_mode == 0);
+    CHECK((rl_readline_state & RL_STATE_OVERWRITE) != 0);
+    CHECK(call_command(__LINE__, "self-insert", 1, 'X') == 0);
+    CHECK(strcmp(rl_line_buffer, "aXc") == 0);
+    CHECK(rl_point == 2);
+    CHECK(call_command(__LINE__, "overwrite-mode", 1, 0) == 0);
+    CHECK(rl_insert_mode == 1);
+    CHECK((rl_readline_state & RL_STATE_OVERWRITE) == 0);
+
+    /* Numeric argument state is recorded and reset by the next command. */
+    CHECK(call_command(__LINE__, "digit-argument", 1, '3') == 0);
+    CHECK(rl_numeric_arg == 3);
+    CHECK(rl_explicit_arg == 1);
+    CHECK((rl_readline_state & RL_STATE_NUMERICARG) != 0);
+    CHECK(call_command(__LINE__, "beginning-of-line", 1, 0) == 0);
+    CHECK(rl_explicit_arg == 0);
+    CHECK(rl_numeric_arg == 1);
+    CHECK((rl_readline_state & RL_STATE_NUMERICARG) == 0);
+    CHECK(call_command(__LINE__, "universal-argument", 1, 0) == 0);
+    CHECK(rl_numeric_arg == 4);
+    CHECK(rl_explicit_arg == 1);
+    CHECK(call_command(__LINE__, "beginning-of-line", 1, 0) == 0);
+    CHECK(rl_numeric_arg == 1 && rl_explicit_arg == 0);
+
+    /* quoted-insert consumes a pending input byte. */
+    rl_replace_line("", 0);
+    rl_pending_input = 'Q';
+    CHECK(call_command(__LINE__, "quoted-insert", 1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "Q") == 0);
+    CHECK(rl_pending_input == 0);
+
+    /* rl_add_defun resolves and reuses a real command body. */
+    forward = rl_named_function("forward-char");
+    CHECK(forward != NULL);
+    CHECK(rl_add_defun("ruline-forward-char", forward, -1) == 0);
+    alias = rl_named_function("ruline-forward-char");
+    CHECK(alias == forward);
+    rl_replace_line("abc", 0);
+    rl_point = 0;
+    CHECK(alias(1, 0) == 0);
+    CHECK(rl_point == 1);
+
+    /* accept-line sets the done flag and state bit without a terminal loop. */
+    CHECK(rl_done == 0);
+    CHECK(call_command(__LINE__, "accept-line", 1, 0) == 0);
+    CHECK(rl_done == 1);
+    CHECK((rl_readline_state & RL_STATE_DONE) != 0);
+
+    /* abort clears a pending input byte and returns. */
+    rl_pending_input = 'z';
+    CHECK(call_command(__LINE__, "abort", 1, 0) == 0);
+    CHECK(rl_pending_input == 0);
+
     return 0;
 }
 
@@ -1154,6 +1391,9 @@ int main(void) {
         return 1;
     }
     if (test_keymap_and_binding() != 0) {
+        return 1;
+    }
+    if (test_editing_commands() != 0) {
         return 1;
     }
     if (test_completion() != 0) {

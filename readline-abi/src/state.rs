@@ -7,7 +7,7 @@
 
 use std::os::raw::{c_char, c_int};
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 /// Signature of a readline bindable command.
 pub type RlCommandFunc = Option<unsafe extern "C" fn(c_int, c_int) -> c_int>;
@@ -17,6 +17,8 @@ const DEFAULT_KEYBOARD_TIMEOUT: c_int = 100_000;
 
 static LINE_CAPACITY: AtomicUsize = AtomicUsize::new(0);
 static KEYBOARD_TIMEOUT: AtomicUsize = AtomicUsize::new(DEFAULT_KEYBOARD_TIMEOUT as usize);
+// GNU keeps the sign of the numeric argument in an internal `rl_arg_sign`.
+static ARGUMENT_SIGN: AtomicI32 = AtomicI32::new(1);
 
 static EMPTY_STRING: [u8; 1] = [0];
 static DEFAULT_READLINE_NAME: [u8; 6] = *b"other\0";
@@ -39,6 +41,11 @@ pub static mut rl_readline_state: std::os::raw::c_ulong = 0;
 pub static mut rl_done: c_int = 0;
 #[no_mangle]
 pub static mut rl_pending_input: c_int = 0;
+
+#[no_mangle]
+pub static mut rl_numeric_arg: c_int = 1;
+#[no_mangle]
+pub static mut rl_explicit_arg: c_int = 0;
 
 #[no_mangle]
 pub static mut rl_prompt: *mut c_char = ptr::null_mut();
@@ -90,6 +97,8 @@ scalar_accessors!(end, set_end, rl_end, c_int);
 scalar_accessors!(mark, set_mark, rl_mark, c_int);
 scalar_accessors!(done, set_done, rl_done, c_int);
 scalar_accessors!(pending_input, set_pending_input, rl_pending_input, c_int);
+scalar_accessors!(numeric_arg, set_numeric_arg, rl_numeric_arg, c_int);
+scalar_accessors!(explicit_arg, set_explicit_arg, rl_explicit_arg, c_int);
 scalar_accessors!(
     readline_state,
     set_readline_state,
@@ -148,8 +157,24 @@ pub(crate) fn char_ptr_as_u8(pointer: *mut c_char) -> *mut u8 {
     pointer as *mut u8
 }
 
+pub(crate) fn last_func() -> RlCommandFunc {
+    unsafe { ptr::addr_of!(rl_last_func).read() }
+}
+
 pub(crate) fn set_last_func(value: RlCommandFunc) {
     unsafe { ptr::addr_of_mut!(rl_last_func).write(value) }
+}
+
+pub(crate) fn set_argument_sign(value: c_int) {
+    ARGUMENT_SIGN.store(value, Ordering::Relaxed);
+}
+
+/// Restore the default numeric argument, as GNU does before reading the next
+/// command.
+pub(crate) fn reset_argument() {
+    set_numeric_arg(1);
+    set_explicit_arg(0);
+    set_argument_sign(1);
 }
 
 // --- Line buffer allocation ----------------------------------------------

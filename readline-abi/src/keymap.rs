@@ -7,10 +7,10 @@
 //! entry point below is a real, self-contained implementation.
 //!
 //! Default keymap slots and default command names are generated from the GNU
-//! readline 8.3 oracle as name/number facts (`keymap_defaults.rs`).  The
-//! funmap command bodies are intentionally inert placeholders: they are not
-//! exported ABI symbols, and a host that later owns the live editor replaces
-//! them through the same name table.
+//! readline 8.3 oracle as name/number facts (`keymap_defaults.rs`).  Commands
+//! that can edit the ABI line buffer standalone resolve to the real bodies in
+//! `editing.rs`; the remainder stay inert until the live dispatcher is wired
+//! in (niubash#775).
 
 use std::ffi::{CStr, CString, OsStr};
 use std::fs;
@@ -262,6 +262,13 @@ fn store() -> MutexGuard<'static, Store> {
 
 pub(crate) fn initialize() {
     ensure_initialized();
+}
+
+/// Whether the active editing mode is emacs.  Editing commands use this for
+/// GNU's emacs-only mark updates.
+pub(crate) fn emacs_mode() -> bool {
+    ensure_initialized();
+    matches!(store().editing_mode, EditMode::Emacs)
 }
 
 fn ensure_initialized() {
@@ -530,20 +537,13 @@ fn caret_value(byte: u8) -> u8 {
 ///
 /// Supported forms include `\C-x`, `\M-x`, `\e`, `\n`, `\t`, `\xHH`,
 /// `\ooo`, `^?`, backslash quoting, and a surrounding single or double quote.
-fn translate_impl(
-    sequence: &[u8],
-    meta_prefix: bool,
-    binding_syntax: bool,
-) -> Result<Vec<u8>, ()> {
+fn translate_impl(sequence: &[u8], meta_prefix: bool, binding_syntax: bool) -> Result<Vec<u8>, ()> {
     let mut input = sequence;
     // GNU rl_translate_keyseq itself does NOT strip quotes or translate
     // caret notation; the inputrc/bind parser does that before it calls
     // here.  Keep `binding_syntax` for the parser's older convenience
     // path, but the exported rl_translate_keyseq uses the GNU form.
-    if binding_syntax
-        && input.len() >= 2
-        && (input[0] == b'"' || input[0] == b'\'')
-    {
+    if binding_syntax && input.len() >= 2 && (input[0] == b'"' || input[0] == b'\'') {
         if input[input.len() - 1] != input[0] {
             return Err(());
         }
@@ -2565,9 +2565,8 @@ mod tests {
     fn lookup_spelling(spelling: &std::ffi::CStr, kind: *mut c_int) -> RlCommandFunc {
         let mut raw = [0u8; 64];
         let mut length = 0;
-        let rc = unsafe {
-            rl_translate_keyseq(spelling.as_ptr(), raw.as_mut_ptr().cast(), &mut length)
-        };
+        let rc =
+            unsafe { rl_translate_keyseq(spelling.as_ptr(), raw.as_mut_ptr().cast(), &mut length) };
         assert_eq!(rc, 0);
         unsafe { rl_function_of_keyseq(raw.as_ptr().cast(), ptr::null_mut(), kind) }
     }
@@ -2596,10 +2595,7 @@ mod tests {
             translate_impl(b"\\M-x", true, false).unwrap(),
             vec![0x1b, b'x']
         );
-        assert_eq!(
-            translate_impl(b"\\M-x", false, false).unwrap(),
-            vec![0xf8]
-        );
+        assert_eq!(translate_impl(b"\\M-x", false, false).unwrap(), vec![0xf8]);
         // Quotes are literal at the ABI layer; the parser trims them.
         assert_eq!(
             translate_impl(b"\"\\C-x\\C-r\"", true, false).unwrap(),

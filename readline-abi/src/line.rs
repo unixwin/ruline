@@ -73,11 +73,16 @@ fn write_stdout(bytes: &[u8]) {
 
 pub(crate) fn initialize_line_state() {
     state::reset_line_state();
+    state::reset_argument();
     state::set_mark(0);
     state::set_done(0);
     state::set_insert_mode(1);
     state::set_last_func(None);
     state::set_key_sequence_length(0);
+    state::set_readline_state(
+        state::readline_state()
+            & !(crate::editing::RL_STATE_OVERWRITE_BIT | crate::editing::RL_STATE_NUMERICARG_BIT),
+    );
     if state::display_prompt().is_null() {
         state::set_display_prompt(match state::prompt() {
             prompt if !prompt.is_null() => prompt,
@@ -260,14 +265,10 @@ pub unsafe extern "C" fn rl_copy_text(from: c_int, to: c_int) -> *mut c_char {
 
 #[no_mangle]
 pub unsafe extern "C" fn rl_kill_text(from: c_int, to: c_int) -> c_int {
-    if from == to {
-        return 0;
-    }
-
-    let copied = rl_copy_text(from, to);
-    let removed = rl_delete_text(from, to);
-    free_c_string(copied);
-    removed
+    // GNU saves the killed text on the kill ring and reports success, not the
+    // number of removed bytes (see kill.c:rl_kill_text).
+    crate::editing::kill_text(from, to);
+    0
 }
 
 #[no_mangle]
