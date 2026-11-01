@@ -10,6 +10,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod completion;
+mod editing;
 mod history;
 mod interactive;
 mod keymap;
@@ -20,4 +21,6 @@ mod state;
 pub use completion::*;
 pub use history::*;
 pub use interactive::*;
+pub use keymap::*;
 pub use line::*;
+pub use state::*;

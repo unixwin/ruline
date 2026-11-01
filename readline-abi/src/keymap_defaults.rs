@@ -4,10 +4,18 @@
 //! occupies each slot of GNU readline's default Emacs and vi keymaps.  Only
 //! names, numeric slots, and structure are reproduced; no GNU source text is
 //! copied.  Regenerate the facts from the vendored tree when the oracle moves.
+//!
+//! `DEFAULT_FUNMAP` also names the command body for each default function:
+//! standalone editing bodies live in `editing.rs`, completion/dump/inputrc
+//! names point at their existing ABI entry points, and names mapped to
+//! `editing::remaining` are the documented live-dispatcher remainder.
 
 use std::os::raw::c_int;
 
+use crate::editing;
 use crate::state::RlCommandFunc;
+
+type Command = unsafe extern "C" fn(c_int, c_int) -> c_int;
 
 #[derive(Clone, Copy)]
 pub(crate) enum BindTarget {
@@ -18,161 +26,186 @@ pub(crate) enum BindTarget {
 use BindTarget::{Cmd, Map};
 
 macro_rules! default_commands {
-    ($(($name:literal, $func:ident)),* $(,)?) => {
-        $(unsafe extern "C" fn $func(_: c_int, _: c_int) -> c_int { 0 })*
+    (
+        wrapped: [
+            $(($name:literal, $func:ident, $body:path, $numeric_prefix:expr)),* $(,)?
+        ],
+        direct: [
+            $(($direct_name:literal, $direct_body:path)),* $(,)?
+        ],
+    ) => {
+        $(
+            /// Funmap wrapper: keeps GNU's `rl_last_func` and kill-coalescing
+            /// bookkeeping around the standalone command body.
+            pub(crate) unsafe extern "C" fn $func(count: c_int, key: c_int) -> c_int {
+                let previous_generation = crate::editing::begin_command();
+                let result = $body(count, key);
+                crate::editing::end_command(previous_generation, $numeric_prefix);
+                crate::state::set_last_func(Some($func as Command));
+                result
+            }
+        )*
 
         pub(crate) static DEFAULT_FUNMAP: &[(&str, RlCommandFunc)] = &[
-            $(($name, Some($func as unsafe extern "C" fn(c_int, c_int) -> c_int))),*
+            $(($name, Some($func as Command))),*,
+            $(($direct_name, Some($direct_body as Command))),*
         ];
     };
 }
 
+// Commands in the `wrapped` table run through a generated wrapper so that
+// `rl_last_func` and consecutive-kill bookkeeping match GNU's dispatcher.
+// `direct` entries are already ABI functions (completion, dumping, inputrc).
 default_commands! {
-    ("abort", cmd_abort),
-    ("accept-line", cmd_accept_line),
-    ("arrow-key-prefix", cmd_arrow_key_prefix),
-    ("backward-byte", cmd_backward_byte),
-    ("backward-char", cmd_backward_char),
-    ("backward-delete-char", cmd_backward_delete_char),
-    ("backward-kill-line", cmd_backward_kill_line),
-    ("backward-kill-word", cmd_backward_kill_word),
-    ("backward-word", cmd_backward_word),
-    ("beginning-of-history", cmd_beginning_of_history),
-    ("beginning-of-line", cmd_beginning_of_line),
-    ("bracketed-paste-begin", cmd_bracketed_paste_begin),
-    ("call-last-kbd-macro", cmd_call_last_kbd_macro),
-    ("capitalize-word", cmd_capitalize_word),
-    ("character-search", cmd_character_search),
-    ("character-search-backward", cmd_character_search_backward),
-    ("clear-display", cmd_clear_display),
-    ("clear-screen", cmd_clear_screen),
-    ("complete", cmd_complete),
-    ("copy-backward-word", cmd_copy_backward_word),
-    ("copy-forward-word", cmd_copy_forward_word),
-    ("copy-region-as-kill", cmd_copy_region_as_kill),
-    ("delete-char", cmd_delete_char),
-    ("delete-char-or-list", cmd_delete_char_or_list),
-    ("delete-horizontal-space", cmd_delete_horizontal_space),
-    ("digit-argument", cmd_digit_argument),
-    ("do-lowercase-version", cmd_do_lowercase_version),
-    ("downcase-word", cmd_downcase_word),
-    ("dump-functions", cmd_dump_functions),
-    ("dump-macros", cmd_dump_macros),
-    ("dump-variables", cmd_dump_variables),
-    ("emacs-editing-mode", cmd_emacs_editing_mode),
-    ("end-kbd-macro", cmd_end_kbd_macro),
-    ("end-of-history", cmd_end_of_history),
-    ("end-of-line", cmd_end_of_line),
-    ("exchange-point-and-mark", cmd_exchange_point_and_mark),
-    ("execute-named-command", cmd_execute_named_command),
-    ("export-completions", cmd_export_completions),
-    ("fetch-history", cmd_fetch_history),
-    ("forward-backward-delete-char", cmd_forward_backward_delete_char),
-    ("forward-byte", cmd_forward_byte),
-    ("forward-char", cmd_forward_char),
-    ("forward-search-history", cmd_forward_search_history),
-    ("forward-word", cmd_forward_word),
-    ("history-search-backward", cmd_history_search_backward),
-    ("history-search-forward", cmd_history_search_forward),
-    ("history-substring-search-backward", cmd_history_substring_search_backward),
-    ("history-substring-search-forward", cmd_history_substring_search_forward),
-    ("insert-comment", cmd_insert_comment),
-    ("insert-completions", cmd_insert_completions),
-    ("kill-whole-line", cmd_kill_whole_line),
-    ("kill-line", cmd_kill_line),
-    ("kill-region", cmd_kill_region),
-    ("kill-word", cmd_kill_word),
-    ("menu-complete", cmd_menu_complete),
-    ("menu-complete-backward", cmd_menu_complete_backward),
-    ("next-history", cmd_next_history),
-    ("next-screen-line", cmd_next_screen_line),
-    ("non-incremental-forward-search-history", cmd_non_incremental_forward_search_history),
-    ("non-incremental-reverse-search-history", cmd_non_incremental_reverse_search_history),
-    ("non-incremental-forward-search-history-again", cmd_non_incremental_forward_search_history_again),
-    ("non-incremental-reverse-search-history-again", cmd_non_incremental_reverse_search_history_again),
-    ("old-menu-complete", cmd_old_menu_complete),
-    ("operate-and-get-next", cmd_operate_and_get_next),
-    ("overwrite-mode", cmd_overwrite_mode),
-    ("paste-from-clipboard", cmd_paste_from_clipboard),
-    ("possible-completions", cmd_possible_completions),
-    ("previous-history", cmd_previous_history),
-    ("previous-screen-line", cmd_previous_screen_line),
-    ("print-last-kbd-macro", cmd_print_last_kbd_macro),
-    ("quoted-insert", cmd_quoted_insert),
-    ("re-read-init-file", cmd_re_read_init_file),
-    ("redraw-current-line", cmd_redraw_current_line),
-    ("reverse-search-history", cmd_reverse_search_history),
-    ("revert-line", cmd_revert_line),
-    ("self-insert", cmd_self_insert),
-    ("set-mark", cmd_set_mark),
-    ("skip-csi-sequence", cmd_skip_csi_sequence),
-    ("start-kbd-macro", cmd_start_kbd_macro),
-    ("tab-insert", cmd_tab_insert),
-    ("tilde-expand", cmd_tilde_expand),
-    ("transpose-chars", cmd_transpose_chars),
-    ("transpose-words", cmd_transpose_words),
-    ("tty-status", cmd_tty_status),
-    ("undo", cmd_undo),
-    ("universal-argument", cmd_universal_argument),
-    ("unix-filename-rubout", cmd_unix_filename_rubout),
-    ("unix-line-discard", cmd_unix_line_discard),
-    ("unix-word-rubout", cmd_unix_word_rubout),
-    ("upcase-word", cmd_upcase_word),
-    ("yank", cmd_yank),
-    ("yank-last-arg", cmd_yank_last_arg),
-    ("yank-nth-arg", cmd_yank_nth_arg),
-    ("yank-pop", cmd_yank_pop),
-    ("vi-append-eol", cmd_vi_append_eol),
-    ("vi-append-mode", cmd_vi_append_mode),
-    ("vi-arg-digit", cmd_vi_arg_digit),
-    ("vi-back-to-indent", cmd_vi_back_to_indent),
-    ("vi-backward-bigword", cmd_vi_backward_bigword),
-    ("vi-backward-word", cmd_vi_backward_word),
-    ("vi-bWord", cmd_vi_bWord),
-    ("vi-bword", cmd_vi_bword),
-    ("vi-change-case", cmd_vi_change_case),
-    ("vi-change-char", cmd_vi_change_char),
-    ("vi-change-to", cmd_vi_change_to),
-    ("vi-char-search", cmd_vi_char_search),
-    ("vi-column", cmd_vi_column),
-    ("vi-complete", cmd_vi_complete),
-    ("vi-delete", cmd_vi_delete),
-    ("vi-delete-to", cmd_vi_delete_to),
-    ("vi-eWord", cmd_vi_eWord),
-    ("vi-editing-mode", cmd_vi_editing_mode),
-    ("vi-end-bigword", cmd_vi_end_bigword),
-    ("vi-end-word", cmd_vi_end_word),
-    ("vi-eof-maybe", cmd_vi_eof_maybe),
-    ("vi-eword", cmd_vi_eword),
-    ("vi-fWord", cmd_vi_fWord),
-    ("vi-fetch-history", cmd_vi_fetch_history),
-    ("vi-first-print", cmd_vi_first_print),
-    ("vi-forward-bigword", cmd_vi_forward_bigword),
-    ("vi-forward-word", cmd_vi_forward_word),
-    ("vi-fword", cmd_vi_fword),
-    ("vi-goto-mark", cmd_vi_goto_mark),
-    ("vi-insert-beg", cmd_vi_insert_beg),
-    ("vi-insertion-mode", cmd_vi_insertion_mode),
-    ("vi-match", cmd_vi_match),
-    ("vi-movement-mode", cmd_vi_movement_mode),
-    ("vi-next-word", cmd_vi_next_word),
-    ("vi-overstrike", cmd_vi_overstrike),
-    ("vi-overstrike-delete", cmd_vi_overstrike_delete),
-    ("vi-prev-word", cmd_vi_prev_word),
-    ("vi-put", cmd_vi_put),
-    ("vi-redo", cmd_vi_redo),
-    ("vi-replace", cmd_vi_replace),
-    ("vi-rubout", cmd_vi_rubout),
-    ("vi-search", cmd_vi_search),
-    ("vi-search-again", cmd_vi_search_again),
-    ("vi-set-mark", cmd_vi_set_mark),
-    ("vi-subst", cmd_vi_subst),
-    ("vi-tilde-expand", cmd_vi_tilde_expand),
-    ("vi-undo", cmd_vi_undo),
-    ("vi-unix-word-rubout", cmd_vi_unix_word_rubout),
-    ("vi-yank-arg", cmd_vi_yank_arg),
-    ("vi-yank-pop", cmd_vi_yank_pop),
-    ("vi-yank-to", cmd_vi_yank_to),
+    wrapped: [
+        ("abort", cmd_abort, editing::abort, false),
+        ("accept-line", cmd_accept_line, editing::accept_line, false),
+        ("arrow-key-prefix", cmd_arrow_key_prefix, editing::remaining, false),
+        ("backward-byte", cmd_backward_byte, editing::backward_byte, false),
+        ("backward-char", cmd_backward_char, editing::backward_char, false),
+        ("backward-delete-char", cmd_backward_delete_char, editing::backward_delete_char, false),
+        ("backward-kill-line", cmd_backward_kill_line, editing::backward_kill_line, false),
+        ("backward-kill-word", cmd_backward_kill_word, editing::backward_kill_word, false),
+        ("backward-word", cmd_backward_word, editing::backward_word, false),
+        ("beginning-of-history", cmd_beginning_of_history, editing::remaining, false),
+        ("beginning-of-line", cmd_beginning_of_line, editing::beginning_of_line, false),
+        ("bracketed-paste-begin", cmd_bracketed_paste_begin, editing::remaining, false),
+        ("call-last-kbd-macro", cmd_call_last_kbd_macro, editing::remaining, false),
+        ("capitalize-word", cmd_capitalize_word, editing::capitalize_word, false),
+        ("character-search", cmd_character_search, editing::remaining, false),
+        ("character-search-backward", cmd_character_search_backward, editing::remaining, false),
+        ("clear-display", cmd_clear_display, editing::remaining, false),
+        ("clear-screen", cmd_clear_screen, editing::remaining, false),
+        ("copy-backward-word", cmd_copy_backward_word, editing::copy_backward_word, false),
+        ("copy-forward-word", cmd_copy_forward_word, editing::copy_forward_word, false),
+        ("copy-region-as-kill", cmd_copy_region_as_kill, editing::copy_region_as_kill, false),
+        ("delete-char", cmd_delete_char, editing::delete_char, false),
+        ("delete-char-or-list", cmd_delete_char_or_list, editing::delete_char_or_list, false),
+        ("delete-horizontal-space", cmd_delete_horizontal_space, editing::delete_horizontal_space, false),
+        ("digit-argument", cmd_digit_argument, editing::digit_argument, true),
+        ("do-lowercase-version", cmd_do_lowercase_version, editing::remaining, false),
+        ("downcase-word", cmd_downcase_word, editing::downcase_word, false),
+        ("emacs-editing-mode", cmd_emacs_editing_mode, editing::remaining, false),
+        ("end-kbd-macro", cmd_end_kbd_macro, editing::remaining, false),
+        ("end-of-history", cmd_end_of_history, editing::remaining, false),
+        ("end-of-line", cmd_end_of_line, editing::end_of_line, false),
+        ("exchange-point-and-mark", cmd_exchange_point_and_mark, editing::exchange_point_and_mark, false),
+        ("execute-named-command", cmd_execute_named_command, editing::remaining, false),
+        ("export-completions", cmd_export_completions, editing::remaining, false),
+        ("fetch-history", cmd_fetch_history, editing::remaining, false),
+        ("forward-backward-delete-char", cmd_forward_backward_delete_char, editing::forward_backward_delete_char, false),
+        ("forward-byte", cmd_forward_byte, editing::forward_byte, false),
+        ("forward-char", cmd_forward_char, editing::forward_char, false),
+        ("forward-search-history", cmd_forward_search_history, editing::remaining, false),
+        ("forward-word", cmd_forward_word, editing::forward_word, false),
+        ("history-search-backward", cmd_history_search_backward, editing::remaining, false),
+        ("history-search-forward", cmd_history_search_forward, editing::remaining, false),
+        ("history-substring-search-backward", cmd_history_substring_search_backward, editing::remaining, false),
+        ("history-substring-search-forward", cmd_history_substring_search_forward, editing::remaining, false),
+        ("insert-comment", cmd_insert_comment, editing::remaining, false),
+        ("kill-whole-line", cmd_kill_whole_line, editing::kill_whole_line, false),
+        ("kill-line", cmd_kill_line, editing::kill_line, false),
+        ("kill-region", cmd_kill_region, editing::kill_region, false),
+        ("kill-word", cmd_kill_word, editing::kill_word, false),
+        ("next-history", cmd_next_history, editing::remaining, false),
+        ("next-screen-line", cmd_next_screen_line, editing::remaining, false),
+        ("non-incremental-forward-search-history", cmd_non_incremental_forward_search_history, editing::remaining, false),
+        ("non-incremental-reverse-search-history", cmd_non_incremental_reverse_search_history, editing::remaining, false),
+        ("non-incremental-forward-search-history-again", cmd_non_incremental_forward_search_history_again, editing::remaining, false),
+        ("non-incremental-reverse-search-history-again", cmd_non_incremental_reverse_search_history_again, editing::remaining, false),
+        ("old-menu-complete", cmd_old_menu_complete, editing::remaining, false),
+        ("operate-and-get-next", cmd_operate_and_get_next, editing::remaining, false),
+        ("overwrite-mode", cmd_overwrite_mode, editing::overwrite_mode, false),
+        ("paste-from-clipboard", cmd_paste_from_clipboard, editing::remaining, false),
+        ("previous-history", cmd_previous_history, editing::remaining, false),
+        ("previous-screen-line", cmd_previous_screen_line, editing::remaining, false),
+        ("print-last-kbd-macro", cmd_print_last_kbd_macro, editing::remaining, false),
+        ("quoted-insert", cmd_quoted_insert, editing::quoted_insert, false),
+        ("redraw-current-line", cmd_redraw_current_line, editing::remaining, false),
+        ("reverse-search-history", cmd_reverse_search_history, editing::remaining, false),
+        ("revert-line", cmd_revert_line, editing::remaining, false),
+        ("self-insert", cmd_self_insert, editing::self_insert, false),
+        ("set-mark", cmd_set_mark, editing::set_mark, false),
+        ("skip-csi-sequence", cmd_skip_csi_sequence, editing::remaining, false),
+        ("start-kbd-macro", cmd_start_kbd_macro, editing::remaining, false),
+        ("tab-insert", cmd_tab_insert, editing::tab_insert, false),
+        ("tilde-expand", cmd_tilde_expand, editing::remaining, false),
+        ("transpose-chars", cmd_transpose_chars, editing::transpose_chars, false),
+        ("transpose-words", cmd_transpose_words, editing::transpose_words, false),
+        ("tty-status", cmd_tty_status, editing::remaining, false),
+        ("undo", cmd_undo, editing::remaining, false),
+        ("universal-argument", cmd_universal_argument, editing::universal_argument, true),
+        ("unix-filename-rubout", cmd_unix_filename_rubout, editing::unix_filename_rubout, false),
+        ("unix-line-discard", cmd_unix_line_discard, editing::unix_line_discard, false),
+        ("unix-word-rubout", cmd_unix_word_rubout, editing::unix_word_rubout, false),
+        ("upcase-word", cmd_upcase_word, editing::upcase_word, false),
+        ("yank", cmd_yank, editing::yank, false),
+        ("yank-last-arg", cmd_yank_last_arg, editing::remaining, false),
+        ("yank-nth-arg", cmd_yank_nth_arg, editing::remaining, false),
+        ("yank-pop", cmd_yank_pop, editing::yank_pop, false),
+        ("vi-append-eol", cmd_vi_append_eol, editing::remaining, false),
+        ("vi-append-mode", cmd_vi_append_mode, editing::remaining, false),
+        ("vi-arg-digit", cmd_vi_arg_digit, editing::remaining, false),
+        ("vi-back-to-indent", cmd_vi_back_to_indent, editing::remaining, false),
+        ("vi-backward-bigword", cmd_vi_backward_bigword, editing::remaining, false),
+        ("vi-backward-word", cmd_vi_backward_word, editing::remaining, false),
+        ("vi-bWord", cmd_vi_bWord, editing::remaining, false),
+        ("vi-bword", cmd_vi_bword, editing::remaining, false),
+        ("vi-change-case", cmd_vi_change_case, editing::remaining, false),
+        ("vi-change-char", cmd_vi_change_char, editing::remaining, false),
+        ("vi-change-to", cmd_vi_change_to, editing::remaining, false),
+        ("vi-char-search", cmd_vi_char_search, editing::remaining, false),
+        ("vi-column", cmd_vi_column, editing::remaining, false),
+        ("vi-complete", cmd_vi_complete, editing::remaining, false),
+        ("vi-delete", cmd_vi_delete, editing::remaining, false),
+        ("vi-delete-to", cmd_vi_delete_to, editing::remaining, false),
+        ("vi-eWord", cmd_vi_eWord, editing::remaining, false),
+        ("vi-editing-mode", cmd_vi_editing_mode, editing::remaining, false),
+        ("vi-end-bigword", cmd_vi_end_bigword, editing::remaining, false),
+        ("vi-end-word", cmd_vi_end_word, editing::remaining, false),
+        ("vi-eof-maybe", cmd_vi_eof_maybe, editing::remaining, false),
+        ("vi-eword", cmd_vi_eword, editing::remaining, false),
+        ("vi-fWord", cmd_vi_fWord, editing::remaining, false),
+        ("vi-fetch-history", cmd_vi_fetch_history, editing::remaining, false),
+        ("vi-first-print", cmd_vi_first_print, editing::remaining, false),
+        ("vi-forward-bigword", cmd_vi_forward_bigword, editing::remaining, false),
+        ("vi-forward-word", cmd_vi_forward_word, editing::remaining, false),
+        ("vi-fword", cmd_vi_fword, editing::remaining, false),
+        ("vi-goto-mark", cmd_vi_goto_mark, editing::remaining, false),
+        ("vi-insert-beg", cmd_vi_insert_beg, editing::remaining, false),
+        ("vi-insertion-mode", cmd_vi_insertion_mode, editing::remaining, false),
+        ("vi-match", cmd_vi_match, editing::remaining, false),
+        ("vi-movement-mode", cmd_vi_movement_mode, editing::remaining, false),
+        ("vi-next-word", cmd_vi_next_word, editing::remaining, false),
+        ("vi-overstrike", cmd_vi_overstrike, editing::remaining, false),
+        ("vi-overstrike-delete", cmd_vi_overstrike_delete, editing::remaining, false),
+        ("vi-prev-word", cmd_vi_prev_word, editing::remaining, false),
+        ("vi-put", cmd_vi_put, editing::remaining, false),
+        ("vi-redo", cmd_vi_redo, editing::remaining, false),
+        ("vi-replace", cmd_vi_replace, editing::remaining, false),
+        ("vi-rubout", cmd_vi_rubout, editing::remaining, false),
+        ("vi-search", cmd_vi_search, editing::remaining, false),
+        ("vi-search-again", cmd_vi_search_again, editing::remaining, false),
+        ("vi-set-mark", cmd_vi_set_mark, editing::remaining, false),
+        ("vi-subst", cmd_vi_subst, editing::remaining, false),
+        ("vi-tilde-expand", cmd_vi_tilde_expand, editing::remaining, false),
+        ("vi-undo", cmd_vi_undo, editing::remaining, false),
+        ("vi-unix-word-rubout", cmd_vi_unix_word_rubout, editing::remaining, false),
+        ("vi-yank-arg", cmd_vi_yank_arg, editing::remaining, false),
+        ("vi-yank-pop", cmd_vi_yank_pop, editing::remaining, false),
+        ("vi-yank-to", cmd_vi_yank_to, editing::remaining, false),
+    ],
+    direct: [
+        ("complete", crate::completion::rl_complete),
+        ("dump-functions", crate::keymap::rl_dump_functions),
+        ("dump-macros", crate::keymap::rl_dump_macros),
+        ("dump-variables", crate::keymap::rl_dump_variables),
+        ("insert-completions", crate::completion::rl_insert_completions),
+        ("menu-complete", crate::completion::rl_menu_complete),
+        ("menu-complete-backward", crate::completion::rl_backward_menu_complete),
+        ("possible-completions", crate::completion::rl_possible_completions),
+        ("re-read-init-file", crate::keymap::rl_re_read_init_file),
+    ],
 }
 
 pub(crate) fn default_command(name: &str) -> RlCommandFunc {
@@ -181,7 +214,6 @@ pub(crate) fn default_command(name: &str) -> RlCommandFunc {
         .find(|(command, _)| command.eq_ignore_ascii_case(name))
         .and_then(|(_, function)| *function)
 }
-
 // emacs_standard_keymap: 252 populated slots in GNU 8.3.
 pub(crate) const EMACS_STANDARD_KEYMAP_BINDINGS: &[(usize, BindTarget)] = &[
     (0, Cmd("set-mark")),
@@ -901,3 +933,50 @@ pub(crate) const VI_INSERTION_KEYMAP_BINDINGS: &[(usize, BindTarget)] = &[
     (254, Cmd("self-insert")),
     (255, Cmd("self-insert")),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn funmap_names_are_unique_and_cover_every_keymap_slot() {
+        assert_eq!(DEFAULT_FUNMAP.len(), 145);
+
+        let mut names = std::collections::HashSet::new();
+        for (name, function) in DEFAULT_FUNMAP {
+            assert!(function.is_some(), "{name} has no body");
+            assert!(names.insert(*name), "{name} is duplicated");
+        }
+
+        for bindings in [
+            EMACS_STANDARD_KEYMAP_BINDINGS,
+            EMACS_META_KEYMAP_BINDINGS,
+            EMACS_CTLX_KEYMAP_BINDINGS,
+            VI_MOVEMENT_KEYMAP_BINDINGS,
+            VI_INSERTION_KEYMAP_BINDINGS,
+        ] {
+            for (_, target) in bindings {
+                if let BindTarget::Cmd(name) = target {
+                    assert!(
+                        default_command(name).is_some(),
+                        "keymap names {name}, which is not in the funmap"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn editing_names_resolve_to_distinct_real_bodies() {
+        let self_insert = default_command("self-insert").expect("self-insert");
+        let forward_char = default_command("forward-char").expect("forward-char");
+        assert!(!std::ptr::fn_addr_eq(self_insert, forward_char));
+        assert!(std::ptr::fn_addr_eq(
+            default_command("complete").expect("complete"),
+            crate::completion::rl_complete as Command
+        ));
+        // A remaining command still has its own funmap entry/pointer.
+        let undo = default_command("undo").expect("undo");
+        assert!(!std::ptr::fn_addr_eq(undo, self_insert));
+    }
+}

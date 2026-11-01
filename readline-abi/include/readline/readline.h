@@ -120,6 +120,11 @@ extern int rl_insert_mode;
 extern int rl_done;
 extern int rl_pending_input;
 
+/* Numeric-argument state.  rl_explicit_arg is non-zero when a prefix argument
+ * was supplied; rl_numeric_arg holds its value. */
+extern int rl_numeric_arg;
+extern int rl_explicit_arg;
+
 /* Current line, cursor, and mark. */
 extern char *rl_line_buffer;
 extern int rl_point;

@@ -7,10 +7,10 @@
 //! entry point below is a real, self-contained implementation.
 //!
 //! Default keymap slots and default command names are generated from the GNU
-//! readline 8.3 oracle as name/number facts (`keymap_defaults.rs`).  The
-//! funmap command bodies are intentionally inert placeholders: they are not
-//! exported ABI symbols, and a host that later owns the live editor replaces
-//! them through the same name table.
+//! readline 8.3 oracle as name/number facts (`keymap_defaults.rs`).  Commands
+//! that can edit the ABI line buffer standalone resolve to the real bodies in
+//! `editing.rs`; the remainder stay inert until the live dispatcher is wired
+//! in (niubash#775).
 
 use std::ffi::{CStr, CString, OsStr};
 use std::fs;
@@ -262,6 +262,13 @@ fn store() -> MutexGuard<'static, Store> {
 
 pub(crate) fn initialize() {
     ensure_initialized();
+}
+
+/// Whether the active editing mode is emacs.  Editing commands use this for
+/// GNU's emacs-only mark updates.
+pub(crate) fn emacs_mode() -> bool {
+    ensure_initialized();
+    matches!(store().editing_mode, EditMode::Emacs)
 }
 
 fn ensure_initialized() {
