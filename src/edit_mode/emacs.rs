@@ -55,7 +55,15 @@ pub fn default_emacs_keybindings() -> Keybindings {
     // character the kitty protocol reports.
     kb.add_binding(KM::CONTROL, KC::Char('_'), edit_bind(EC::Undo));
     kb.add_binding(KM::CONTROL, KC::Char('7'), edit_bind(EC::Undo));
-    kb.add_binding(KM::CONTROL, KC::Char('g'), edit_bind(EC::Redo));
+    // GNU `abort` — `rl_abort` (readline misc.c): cancels the current
+    // editing command and rings the bell. `bind -p` prints `"\C-g":
+    // abort`; the same slot sits in the vi-command map (`bind -m
+    // vi-command -p`). GNU readline has NO default `redo` binding at all
+    // (`bind -l` lists no `redo` function — only `vi-redo`, unbound), so
+    // the previous `Redo` binding here was an invention that also broke
+    // `C-g` aborting an active search: the engine's search dispatches
+    // abort on the `Esc` event.
+    kb.add_binding(KM::CONTROL, KC::Char('g'), ReedlineEvent::Esc);
     kb.add_binding(KM::CONTROL, KC::Char('z'), ReedlineEvent::Suspend);
     // GNU revert-line (undo.c:331): M-r and M-C-r undo every change to
     // the current line (emacs_keymap.c:445 and :336 respectively).
@@ -348,9 +356,10 @@ impl Emacs {
 
     /// The `C-x` prefix table — GNU `emacs_ctlx_keymap`
     /// (emacs_keymap.c:597+): `(`/`)`/`e` are the keyboard-macro
-    /// commands, `C-u` is `rl_undo_command`, `C-g` aborts. Anything
-    /// else is unbound — GNU dings. Shift counts as the bare
-    /// character: the kitty protocol reports `(` as Shift-9.
+    /// commands, `C-u` is `rl_undo_command`, `C-g` aborts
+    /// (`bind -p`: `"\C-x\C-g": abort`). Anything else is unbound — GNU
+    /// dings. Shift counts as the bare character: the kitty protocol
+    /// reports `(` as Shift-9.
     fn resolve_ctrl_x(modifiers: KeyModifiers, code: KeyCode) -> ReedlineEvent {
         match (modifiers, code) {
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char('(')) => {
@@ -361,6 +370,8 @@ impl Emacs {
             }
             (KeyModifiers::NONE, KeyCode::Char('e')) => ReedlineEvent::CallLastKbdMacro,
             (KeyModifiers::CONTROL, KeyCode::Char('u')) => edit_bind(EditCommand::Undo),
+            // `C-x C-g` — GNU `abort` (the ctlx keymap's own C-g slot).
+            (KeyModifiers::CONTROL, KeyCode::Char('g')) => ReedlineEvent::Esc,
             // `C-x C-x` — GNU `exchange-point-and-mark`
             // (emacs_keymap.c:622).
             (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
@@ -639,6 +650,13 @@ mod test {
             emacs.parse_event(key('u', KeyModifiers::CONTROL)),
             ReedlineEvent::Edit(vec![EditCommand::Undo])
         );
+        // `C-x C-g` aborts — GNU binds the ctlx keymap's C-g slot to
+        // `abort` (`bind -p`: `"\C-x\C-g": abort`).
+        assert_eq!(emacs.parse_event(cx()), ReedlineEvent::Pending);
+        assert_eq!(
+            emacs.parse_event(key('g', KeyModifiers::CONTROL)),
+            ReedlineEvent::Esc
+        );
         // An unbound chord key dings (None) and clears the prefix —
         // the same key self-inserts on the next press.
         assert_eq!(emacs.parse_event(cx()), ReedlineEvent::Pending);
@@ -753,6 +771,32 @@ mod test {
                 "vi must leave M-> unbound like GNU"
             );
         }
+    }
+
+    /// GNU `abort` (readline `rl_abort`): plain `C-g` is bound to it in
+    /// the emacs standard keymap AND in vi-command (`bind -p`: `"\C-g":
+    /// abort`). GNU readline defines no `redo` function at all, so the
+    /// binding must not be `Edit(Redo)` — which also swallowed `C-g`
+    /// during an incremental search instead of aborting it (T2 F3).
+    #[test]
+    fn ctrl_g_is_abort_not_redo() {
+        let kb = default_emacs_keybindings();
+        assert_eq!(
+            kb.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            Some(ReedlineEvent::Esc)
+        );
+        // The vi-command map carries the same abort slot; vi-insert
+        // self-inserts C-g in GNU and stays unbound here.
+        assert_eq!(
+            crate::default_vi_normal_keybindings()
+                .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            Some(ReedlineEvent::Esc)
+        );
+        assert_eq!(
+            crate::default_vi_insert_keybindings()
+                .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            None
+        );
     }
 
     #[test]

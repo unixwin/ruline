@@ -3286,16 +3286,8 @@ impl Reedline {
             }
             ReedlineEvent::CtrlC | ReedlineEvent::Esc => {
                 // `_rl_nsearch_abort` (search.c:270): saved line and
-                // point back, prompt restored.
-                if let Some(state) = self.noninc_search.take() {
-                    self.restore_noninc_saved_line(state);
-                }
-                self.input_mode = InputMode::Regular;
-                Ok(EventStatus::Handled)
-            }
-            // `C-g` arrives bound to `Redo` in the emacs map; in GNU's
-            // dispatch (search.c:335) it is an abort key.
-            ReedlineEvent::Edit(commands) if commands == [EditCommand::Redo] => {
+                // point back, prompt restored. `C-g` reaches this arm as
+                // `Esc` — GNU's abort key, not a `Redo` edit.
                 if let Some(state) = self.noninc_search.take() {
                     self.restore_noninc_saved_line(state);
                 }
@@ -13101,6 +13093,47 @@ mod tests {
 
         drive(&mut rl, &[alt('p')]);
         type_each(&mut rl, &[ch('e'), ch('c'), key(KeyCode::Esc)]);
+        assert_eq!(rl.editor.get_buffer(), "work");
+        assert_eq!(rl.editor.insertion_point(), 3);
+        assert_eq!(rl.input_mode, InputMode::Regular);
+    }
+
+    /// T2 F3: `C-g` is GNU's `abort` key (`bind -p`: `"\C-g": abort`) —
+    /// in an incremental search it ends the search (`_rl_isearch_fini`
+    /// restores the pre-search line) instead of feeding the query. Keys
+    /// typed afterwards land in the regular buffer.
+    #[test]
+    fn ctrl_g_aborts_history_search_and_frees_typing() {
+        let mut rl = seam_engine(Box::<Emacs>::default());
+        seed_history(&mut rl, &["echo one", "echo two"]);
+        drive(&mut rl, &[ctrl('r')]);
+        assert_eq!(rl.input_mode, InputMode::HistorySearch);
+        // A failing query keeps the search open waiting for input.
+        type_each(&mut rl, &[ch('z'), ch('z'), ch('z')]);
+        assert_eq!(rl.input_mode, InputMode::HistorySearch);
+
+        drive(&mut rl, &[ctrl('g')]);
+        assert_eq!(rl.input_mode, InputMode::Regular);
+        assert_eq!(rl.editor.get_buffer(), "");
+
+        // The next keys insert into the live line; they must not extend
+        // the dead search query (the T2 "type-after-Cg" check).
+        type_each(&mut rl, &[ch('e'), ch('c'), ch('h'), ch('o')]);
+        assert_eq!(rl.editor.get_buffer(), "echo");
+    }
+
+    /// `C-g` also aborts a NON-incremental search (`_rl_nsearch_abort`,
+    /// search.c:270): the saved line and point come back. T2 F3.
+    #[test]
+    fn ctrl_g_aborts_noninc_search_and_restores_the_line() {
+        let mut rl = seam_engine(Box::<Emacs>::default());
+        seed_history(&mut rl, &["echo one"]);
+        type_each(&mut rl, &[ch('w'), ch('o'), ch('r'), ch('k')]);
+        drive(&mut rl, &[ctrl('b')]);
+        assert_eq!(rl.editor.insertion_point(), 3);
+
+        drive(&mut rl, &[alt('p')]);
+        type_each(&mut rl, &[ch('e'), ch('c'), ctrl('g')]);
         assert_eq!(rl.editor.get_buffer(), "work");
         assert_eq!(rl.editor.insertion_point(), 3);
         assert_eq!(rl.input_mode, InputMode::Regular);

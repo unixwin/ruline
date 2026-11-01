@@ -25,6 +25,10 @@ pub fn default_vi_normal_keybindings() -> Keybindings {
         edit_bind(EC::MoveLeft { select: false }),
     );
     kb.add_binding(KM::NONE, KC::Delete, edit_bind(EC::Delete));
+    // GNU vi-command binds `C-g` to `abort` (`bind -m vi-command -p`
+    // prints `"\C-g": abort`); vi-insert self-inserts it instead, so the
+    // insert table does not get this binding.
+    kb.add_binding(KM::CONTROL, KC::Char('g'), ReedlineEvent::Esc);
 
     kb
 }
