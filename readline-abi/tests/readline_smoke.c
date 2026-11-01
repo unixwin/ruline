@@ -1312,6 +1312,224 @@ static int test_completion(void) {
     return 0;
 }
 
+static int test_history_abi(void) {
+    char path[512];
+    const char *tmp = getenv("TMPDIR");
+    HIST_ENTRY *entry;
+    HIST_ENTRY **list;
+    HISTORY_STATE *state;
+
+    if (tmp == NULL || *tmp == '\0') {
+        tmp = "/tmp";
+    }
+
+    /* Before the legacy test has allocated anything, GNU returns NULL. */
+    CHECK(history_list() == NULL);
+
+    clear_history();
+    add_history("one");
+    add_history("two");
+    add_history("three");
+    CHECK(history_length == 3);
+
+    list = history_list();
+    CHECK(list != NULL);
+    CHECK(list[0] != NULL && strcmp(list[0]->line, "one") == 0);
+    CHECK(list[1] != NULL && strcmp(list[1]->line, "two") == 0);
+    CHECK(list[2] != NULL && strcmp(list[2]->line, "three") == 0);
+    CHECK(list[3] == NULL);
+
+    using_history();
+    state = history_get_history_state();
+    CHECK(state != NULL);
+    CHECK(state->entries == list);
+    CHECK(state->offset == 3);
+    CHECK(state->length == 3);
+    CHECK(state->size >= state->length);
+    CHECK(state->flags == 0);
+    state->offset = 1;
+    history_set_history_state(state);
+    CHECK(where_history() == 1);
+    free(state);
+    stifle_history(4);
+    state = history_get_history_state();
+    CHECK(state != NULL && (state->flags & HS_STIFLED) != 0);
+    free(state);
+    unstifle_history();
+
+    entry = remove_history(1);
+    CHECK(entry != NULL && strcmp(entry->line, "two") == 0);
+    CHECK(history_length == 2);
+    CHECK(strcmp(history_list()[1]->line, "three") == 0);
+    CHECK(free_history_entry(entry) == NULL);
+    CHECK(remove_history(9) == NULL);
+
+    entry = replace_history_entry(1, "THREE", (histdata_t)0x1234);
+    CHECK(entry != NULL && strcmp(entry->line, "three") == 0);
+    CHECK(strcmp(history_list()[1]->line, "THREE") == 0);
+    CHECK(history_list()[1]->data == (histdata_t)0x1234);
+    free_history_entry(entry);
+    CHECK(replace_history_entry(-1, "x", NULL) == NULL);
+
+    entry = alloc_history_entry("allocated", strdup("#123"));
+    CHECK(entry != NULL);
+    CHECK(strcmp(entry->line, "allocated") == 0);
+    {
+        HIST_ENTRY *copy = copy_history_entry(entry);
+        CHECK(copy != NULL);
+        CHECK(copy->line != entry->line);
+        CHECK(strcmp(copy->timestamp, "#123") == 0);
+        free_history_entry(copy);
+    }
+    history_comment_char = '#';
+    CHECK(history_get_time(entry) == (time_t)123);
+    history_comment_char = 0;
+    free_history_entry(entry);
+
+    {
+        HIST_ENTRY **range = remove_history_range(0, 0);
+        CHECK(range != NULL);
+        CHECK(strcmp(range[0]->line, "one") == 0);
+        CHECK(range[1] == NULL);
+        CHECK(history_length == 1);
+        free_history_entry(range[0]);
+        free(range);
+    }
+    {
+        HIST_ENTRY **range = remove_history_range(0, 0);
+        CHECK(range != NULL);
+        CHECK(strcmp(range[0]->line, "THREE") == 0);
+        CHECK(range[1] == NULL);
+        CHECK(history_length == 0);
+        free_history_entry(range[0]);
+        free(range);
+    }
+    CHECK(remove_history_range(0, 0) == NULL);
+
+    clear_history();
+    add_history("alpha one");
+    add_history("beta two");
+    add_history("alphabet");
+    add_history("gamma alpha");
+    using_history();
+
+    CHECK(history_search("alpha", -1) == 6);
+    CHECK(where_history() == 3);
+    CHECK(history_set_pos(2) == 1);
+    CHECK(history_search("alpha", -1) == 0);
+    CHECK(where_history() == 2);
+    CHECK(history_set_pos(0) == 1);
+    CHECK(history_search("alpha", 1) == 0);
+    CHECK(where_history() == 0);
+    CHECK(history_set_pos(1) == 1);
+    CHECK(history_search("alpha", 1) == 0);
+    CHECK(where_history() == 2);
+    CHECK(history_set_pos(4) == 1);
+    CHECK(history_search_prefix("alpha", -1) == 0);
+    CHECK(where_history() == 2);
+    CHECK(history_set_pos(0) == 1);
+    CHECK(history_search_prefix("alpha", 1) == 0);
+    CHECK(history_search_prefix("zzz", 1) == -1);
+    CHECK(history_search_pos("alpha", -1, 2) == 2);
+    CHECK(where_history() == 0);
+    CHECK(history_search_pos("zzz", -1, 2) == -1);
+    CHECK(where_history() == 0);
+
+    clear_history();
+    add_history("first");
+    add_history("second arg");
+    add_history("third thing here");
+    using_history();
+    {
+        char *output = NULL;
+        CHECK(history_expand("echo !!", &output) == 1);
+        CHECK(output != NULL && strcmp(output, "echo third thing here") == 0);
+        free(output);
+        output = NULL;
+        CHECK(history_expand("echo !2", &output) == 1);
+        CHECK(output != NULL && strcmp(output, "echo second arg") == 0);
+        free(output);
+        output = NULL;
+        CHECK(history_expand("echo !nosuch", &output) == -1);
+        CHECK(output != NULL && strcmp(output, "!nosuch: event not found") == 0);
+        free(output);
+        output = NULL;
+        CHECK(history_expand("echo !!:$", &output) == 1);
+        CHECK(output != NULL && strcmp(output, "echo here") == 0);
+        free(output);
+        output = NULL;
+        CHECK(history_expand("echo !!:q", &output) == 1);
+        CHECK(output != NULL && strcmp(output, "echo 'third thing here'") == 0);
+        free(output);
+        output = NULL;
+        CHECK(history_expand("echo !!:p", &output) == 2);
+        CHECK(output != NULL && strcmp(output, "echo third thing here") == 0);
+        free(output);
+        output = NULL;
+        CHECK(history_expand("echo !!:s/third/THIRD/", &output) == 1);
+        CHECK(output != NULL && strcmp(output, "echo THIRD thing here") == 0);
+        free(output);
+        output = NULL;
+        CHECK(history_expand("echo \\!!", &output) == 0);
+        CHECK(output != NULL && strcmp(output, "echo \\!!") == 0);
+        free(output);
+    }
+
+    {
+        char **words = history_tokenize("echo 'a b' \"c d\"");
+        CHECK(words != NULL);
+        CHECK(words[0] != NULL && strcmp(words[0], "echo") == 0);
+        CHECK(words[1] != NULL && strcmp(words[1], "'a b'") == 0);
+        CHECK(words[2] != NULL && strcmp(words[2], "\"c d\"") == 0);
+        CHECK(words[3] == NULL);
+        for (int i = 0; words[i] != NULL; i++) {
+            free(words[i]);
+        }
+        free(words);
+        words = history_tokenize("foo|bar;baz");
+        CHECK(words != NULL);
+        CHECK(strcmp(words[1], "|") == 0);
+        CHECK(strcmp(words[3], ";") == 0);
+        for (int i = 0; words[i] != NULL; i++) {
+            free(words[i]);
+        }
+        free(words);
+        CHECK(history_tokenize("") == NULL);
+    }
+
+    {
+        char *arguments = history_arg_extract(1, 2, "cmd one two three");
+        CHECK(arguments != NULL && strcmp(arguments, "one two") == 0);
+        free(arguments);
+        arguments = history_arg_extract((int)'$', (int)'$', "cmd one two three");
+        CHECK(arguments != NULL && strcmp(arguments, "three") == 0);
+        free(arguments);
+        CHECK(history_arg_extract(9, 9, "cmd one") == NULL);
+    }
+
+    snprintf(path, sizeof(path), "%s/ruline-history-abi-%ld", tmp, (long)getpid());
+    {
+        FILE *file = fopen(path, "w");
+        CHECK(file != NULL);
+        fputs("one\ntwo\nthree\nfour\n", file);
+        fclose(file);
+    }
+    CHECK(history_truncate_file(path, 2) == 0);
+    {
+        FILE *file = fopen(path, "r");
+        char line[128];
+        CHECK(file != NULL);
+        CHECK(fgets(line, sizeof(line), file) != NULL && strcmp(line, "three\n") == 0);
+        CHECK(fgets(line, sizeof(line), file) != NULL && strcmp(line, "four\n") == 0);
+        CHECK(fgets(line, sizeof(line), file) == NULL);
+        fclose(file);
+    }
+    unlink(path);
+
+    clear_history();
+    return 0;
+}
+
 static int test_history(void) {
     char path[512];
     char timestamp_path[512];
@@ -1449,6 +1667,9 @@ int main(void) {
         return 1;
     }
     if (test_completion() != 0) {
+        return 1;
+    }
+    if (test_history_abi() != 0) {
         return 1;
     }
     if (test_history() != 0) {

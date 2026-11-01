@@ -43,16 +43,28 @@ typedef struct _hist_state {
 
 #define HS_STIFLED 0x01
 
+/* Callback used to veto individual history expansions. */
+typedef int history_inhibit_expansion_func_t(char *, int);
+
 /* Session and list management. */
 extern void using_history(void);
+extern HISTORY_STATE *history_get_history_state(void);
+extern void history_set_history_state(HISTORY_STATE *);
 extern void add_history(const char *);
 extern void add_history_time(const char *);
+extern HIST_ENTRY *remove_history(int);
+extern HIST_ENTRY **remove_history_range(int, int);
+extern HIST_ENTRY *alloc_history_entry(char *, char *);
+extern HIST_ENTRY *copy_history_entry(HIST_ENTRY *);
+extern histdata_t free_history_entry(HIST_ENTRY *);
+extern HIST_ENTRY *replace_history_entry(int, const char *, histdata_t);
 extern void clear_history(void);
 extern void stifle_history(int);
 extern int unstifle_history(void);
 extern int history_is_stifled(void);
 
 /* Traversal and lookup. */
+extern HIST_ENTRY **history_list(void);
 extern int where_history(void);
 extern HIST_ENTRY *current_history(void);
 extern HIST_ENTRY *history_get(int);
@@ -61,6 +73,17 @@ extern int history_set_pos(int);
 extern HIST_ENTRY *previous_history(void);
 extern HIST_ENTRY *next_history(void);
 extern int history_total_bytes(void);
+
+/* Searching the history list. */
+extern int history_search(const char *, int);
+extern int history_search_prefix(const char *, int);
+extern int history_search_pos(const char *, int, int);
+
+/* History expansion. */
+extern int history_expand(const char *, char **);
+extern char *history_arg_extract(int, int, const char *);
+extern char *get_history_event(const char *, int *, int);
+extern char **history_tokenize(const char *);
 
 /* File I/O.  A NULL filename selects $HOME/.history. */
 extern int read_history(const char *);
@@ -89,6 +112,7 @@ extern int history_quoting_state;
 extern int history_write_timestamps;
 extern int history_multiline_entries;
 extern int history_file_version;
+extern history_inhibit_expansion_func_t *history_inhibit_expansion_function;
 
 #ifdef __cplusplus
 }
