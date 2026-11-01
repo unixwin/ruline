@@ -42,6 +42,7 @@ use crate::state;
 pub(crate) const RL_STATE_TERMPREPPED: c_ulong = 0x0000_0004;
 pub(crate) const RL_STATE_READCMD: c_ulong = 0x0000_0008;
 pub(crate) const RL_STATE_DISPATCHING: c_ulong = 0x0000_0020;
+pub(crate) const RL_STATE_MOREINPUT: c_ulong = 0x0000_0040;
 pub(crate) const RL_STATE_SIGHANDLER: c_ulong = 0x0000_8000;
 pub(crate) const RL_STATE_INPUTPENDING: c_ulong = 0x0002_0000;
 pub(crate) const RL_STATE_CALLBACK: c_ulong = 0x0008_0000;
@@ -288,17 +289,30 @@ fn kernel_dimensions() -> Option<(u32, u32)> {
 
 fn load_dimensions() -> (u32, u32) {
     let kernel = kernel_dimensions();
-    let rows = kernel
-        .map(|(rows, _)| rows)
-        .or_else(|| env_dimension("LINES"))
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_ROWS);
-    let columns = kernel
-        .map(|(_, columns)| columns)
-        .or_else(|| env_dimension("COLUMNS"))
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_COLUMNS);
-    (rows, columns)
+    let environment = (
+        env_dimension("LINES").filter(|value| *value > 0),
+        env_dimension("COLUMNS").filter(|value| *value > 0),
+    );
+
+    // GNU's `rl_prefer_env_winsize` makes LINES/COLUMNS win over the kernel.
+    let (rows, columns) = if state::prefer_env_winsize() != 0 {
+        (
+            environment.0.or_else(|| kernel.map(|(rows, _)| rows)),
+            environment.1.or_else(|| kernel.map(|(_, columns)| columns)),
+        )
+    } else {
+        (
+            kernel.map(|(rows, _)| rows).or(environment.0),
+            kernel.map(|(_, columns)| columns).or(environment.1),
+        )
+    };
+
+    (
+        rows.filter(|value| *value > 0).unwrap_or(DEFAULT_ROWS),
+        columns
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_COLUMNS),
+    )
 }
 
 fn ensure_dimensions() {
@@ -336,6 +350,17 @@ pub unsafe extern "C" fn rl_get_screen_size(rows: *mut c_int, columns: *mut c_in
     }
     if !columns.is_null() {
         *columns = SCREEN_COLUMNS.load(Ordering::Relaxed) as c_int;
+    }
+}
+
+/// Cached terminal width for screen-line commands.
+pub(crate) fn screen_width() -> c_int {
+    ensure_dimensions();
+    let columns = SCREEN_COLUMNS.load(Ordering::Relaxed) as c_int;
+    if columns > 0 {
+        columns
+    } else {
+        DEFAULT_COLUMNS as c_int
     }
 }
 

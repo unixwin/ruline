@@ -12,6 +12,7 @@
 mod callback;
 mod chars;
 mod completion;
+mod display;
 mod editing;
 mod history;
 mod interactive;
@@ -28,6 +29,7 @@ mod yankarg;
 pub use callback::*;
 pub use chars::*;
 pub use completion::*;
+pub use display::*;
 pub use editing::*;
 pub use history::*;
 pub use interactive::*;

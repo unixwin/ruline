@@ -72,6 +72,57 @@ typedef void rl_vintfunc_t(int);
 /* Callback-mode line handler: called with the completed line, or NULL for
  * EOF and interrupts. */
 typedef void rl_vcpfunc_t(char *);
+typedef int rl_compignore_func_t(char **);
+
+/* Undo-list element.  This adapter does not build undo records yet, but
+ * rl_undo_list and the rl_save_state layout are part of the public ABI. */
+enum undo_code { UNDO_DELETE, UNDO_INSERT, UNDO_BEGIN, UNDO_END };
+typedef struct undo_list {
+    struct undo_list *next;
+    int start;
+    int end;
+    char *text;
+    enum undo_code what;
+} UNDO_LIST;
+
+/* Saved readline process state.  Field order and the trailing reserve match
+ * GNU readline 8.3.  The signal toggles are present for layout compatibility;
+ * this adapter does not implement rl_catch_signals/rl_catch_sigwinch yet. */
+struct readline_state {
+    int point;
+    int end;
+    int mark;
+    int buflen;
+    char *buffer;
+    UNDO_LIST *ul;
+    char *prompt;
+
+    int rlstate;
+    int done;
+    Keymap kmap;
+
+    rl_command_func_t *lastfunc;
+    int insmode;
+    int edmode;
+    char *kseq;
+    int kseqlen;
+
+    int pendingin;
+    FILE *inf;
+    FILE *outf;
+    char *macro;
+
+    int catchsigs;
+    int catchsigwinch;
+
+    rl_compentry_func_t *entryfunc;
+    rl_compentry_func_t *menuentryfunc;
+    rl_compignore_func_t *ignorefunc;
+    rl_completion_func_t *attemptfunc;
+    const char *wordbreakchars;
+
+    char reserved[64];
+};
 
 /* Values passed to rl_filename_quoting_function as the match kind. */
 #define NO_MATCH 0
@@ -122,6 +173,30 @@ extern int rl_echoing_p;
 extern int rl_insert_mode;
 extern int rl_done;
 extern int rl_pending_input;
+
+/* GNU compatibility and process state. */
+extern int rl_gnu_readline_p;
+extern int rl_editing_mode;
+extern int rl_eof_found;
+extern int rl_dispatching;
+extern const char *rl_terminal_name;
+extern FILE *rl_instream;
+extern FILE *rl_outstream;
+extern int rl_prefer_env_winsize;
+extern UNDO_LIST *rl_undo_list;
+extern char *rl_executing_macro;
+
+/* Save/restore the documented process state.  Returns 0, or -1 for NULL. */
+extern int rl_save_state(struct readline_state *);
+extern int rl_restore_state(struct readline_state *);
+
+/* Display controls.  rl_already_prompted is an input-loop contract for hosts
+ * that paint the prompt themselves; rl_num_chars_to_read is honoured by the
+ * callback input loop; rl_erase_empty_line is honoured by the callback-mode
+ * line terminator. */
+extern int rl_erase_empty_line;
+extern int rl_already_prompted;
+extern int rl_num_chars_to_read;
 
 /* Numeric-argument state.  rl_explicit_arg is non-zero when a prefix argument
  * was supplied; rl_numeric_arg holds its value. */
@@ -219,11 +294,24 @@ extern int rl_kill_text(int, int);
 extern void rl_extend_line_buffer(int);
 extern int rl_ding(void);
 extern int rl_crlf(void);
+extern int crlf(void);
 extern int rl_on_new_line(void);
+extern int rl_on_new_line_with_prompt(void);
 extern void rl_redisplay(void);
 extern int rl_forced_update_display(void);
 extern int rl_clear_message(void);
 extern int rl_clear_visible_line(void);
+extern int rl_message(const char *, ...);
+extern int rl_show_char(int);
+extern int rl_character_len(int, int);
+extern void rl_redraw_prompt_last_line(void);
+extern int rl_refresh_line(int, int);
+extern int rl_clear_screen(int, int);
+extern int rl_clear_display(int, int);
+extern int rl_skip_csi_sequence(int, int);
+extern int rl_arrow_keys(int, int);
+extern int rl_previous_screen_line(int, int);
+extern int rl_next_screen_line(int, int);
 extern void rl_free_line_state(void);
 extern int rl_reset_line_state(void);
 

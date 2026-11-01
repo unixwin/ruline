@@ -906,5 +906,61 @@ int main(void) {
         }
     }
 
+    section("display-state");
+    integer("gnu_readline_p", rl_gnu_readline_p);
+    integer("editing_mode", rl_editing_mode);
+    integer("eof_found", rl_eof_found);
+    integer("dispatching", rl_dispatching);
+    integer("prefer_env_winsize", rl_prefer_env_winsize);
+    integer("erase_empty_line", rl_erase_empty_line);
+    integer("already_prompted", rl_already_prompted);
+    integer("num_chars_to_read", rl_num_chars_to_read);
+    integer("executing_macro_null", rl_executing_macro == NULL);
+    integer("instream_stdin", rl_instream == stdin);
+    integer("outstream_stdout", rl_outstream == stdout);
+    value("terminal_name", rl_terminal_name);
+    integer("character_len.printable", rl_character_len('a', 0));
+    integer("character_len.control", rl_character_len(0x01, 0));
+    integer("character_len.rubout", rl_character_len(0x7f, 0));
+    integer("character_len.meta", rl_character_len(0x80, 0));
+    integer("character_len.tab.0", rl_character_len('\t', 0));
+    integer("character_len.tab.3", rl_character_len('\t', 3));
+    integer("struct.readline_state.size", (int)sizeof(struct readline_state));
+    integer("struct.ul.offset", (int)offsetof(struct readline_state, ul));
+    integer("struct.kmap.offset", (int)offsetof(struct readline_state, kmap));
+    integer("struct.macro.offset", (int)offsetof(struct readline_state, macro));
+    integer("struct.wordbreakchars.offset",
+            (int)offsetof(struct readline_state, wordbreakchars));
+    integer("struct.reserved.offset",
+            (int)offsetof(struct readline_state, reserved));
+    integer("struct.reserved.size",
+            (int)sizeof(((struct readline_state *)0)->reserved));
+
+    section("saved-state");
+    {
+        struct readline_state saved;
+        char *original;
+        char *replacement;
+        rl_replace_line("snapshot", 0);
+        rl_point = 3;
+        rl_mark = 2;
+        rl_done = 0;
+        integer("save.rc", rl_save_state(&saved));
+        original = rl_line_buffer;
+        replacement = strdup("changed");
+        rl_line_buffer = replacement;
+        rl_end = 7;
+        rl_point = 1;
+        rl_mark = 0;
+        rl_done = 1;
+        integer("restore.rc", rl_restore_state(&saved));
+        integer("restore.buffer_same", rl_line_buffer == original);
+        value("restore.line", rl_line_buffer);
+        integer("restore.point", rl_point);
+        integer("restore.mark", rl_mark);
+        integer("restore.done", rl_done);
+        free(replacement);
+    }
+
     return 0;
 }

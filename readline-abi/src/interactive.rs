@@ -42,6 +42,12 @@ impl Prompt for AbiPrompt {
 }
 
 fn prompt_text() -> String {
+    // GNU skips prompt output when the application has already painted it;
+    // Reedline paints the prompt it is given, so hand it an empty prompt.
+    if crate::display::already_prompted() != 0 {
+        return String::new();
+    }
+
     let prompt = state::prompt();
     if prompt.is_null() {
         String::new()
@@ -68,6 +74,7 @@ fn mark_done() {
 
 fn mark_eof() {
     state::set_done(1);
+    state::set_eof_found(1);
     let current = state::readline_state();
     state::set_readline_state(current | line::RL_STATE_DONE | line::RL_STATE_EOF);
 }
