@@ -21,7 +21,6 @@
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_int;
-use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -1639,60 +1638,6 @@ unsafe fn set_line_from_history(entry: *mut crate::history::HIST_ENTRY) {
     state::set_mark(state::end());
 }
 
-unsafe fn get_previous_history(count: c_int, _key: c_int) -> c_int {
-    if count < 0 {
-        return get_next_history(-count, 0);
-    }
-    if count == 0 || crate::history::history_list().is_null() {
-        return 0;
-    }
-
-    let mut found = ptr::null_mut();
-    let mut remaining = count;
-    while remaining > 0 {
-        let entry = crate::history::previous_history();
-        if entry.is_null() {
-            break;
-        }
-        found = entry;
-        remaining -= 1;
-    }
-    if found.is_null() {
-        crate::editing::ring_bell();
-        0
-    } else {
-        set_line_from_history(found);
-        1
-    }
-}
-
-unsafe fn get_next_history(count: c_int, _key: c_int) -> c_int {
-    if count < 0 {
-        return get_previous_history(-count, 0);
-    }
-    if count == 0 || crate::history::history_list().is_null() {
-        return 0;
-    }
-
-    let mut found = ptr::null_mut();
-    let mut remaining = count;
-    while remaining > 0 {
-        let entry = crate::history::next_history();
-        if entry.is_null() {
-            break;
-        }
-        found = entry;
-        remaining -= 1;
-    }
-    if found.is_null() {
-        crate::editing::ring_bell();
-        0
-    } else {
-        set_line_from_history(found);
-        1
-    }
-}
-
 fn fetch_history_body(count: c_int, key: c_int) -> c_int {
     if state::explicit_arg() != 0 {
         // SAFETY: the history entry points are only read.
@@ -1702,16 +1647,19 @@ fn fetch_history_body(count: c_int, key: c_int) -> c_int {
             // Vi's `G` does not replace the line with an out-of-range entry.
             crate::editing::ring_bell();
         } else {
+            // GNU routes vi `G` through rl_get_previous_history, so the saved
+            // current line and the emacs/vi point rules stay shared with the
+            // history-navigation commands.
             // SAFETY: same history store, no ownership transfer.
             unsafe {
-                get_previous_history(wanted, key);
+                crate::history_nav::rl_get_previous_history(wanted, key);
             }
         }
     } else {
         // SAFETY: same history store, no ownership transfer.
         let offset = unsafe { crate::history::where_history() };
         unsafe {
-            get_previous_history(1 + offset, 0);
+            crate::history_nav::rl_get_previous_history(1 + offset, 0);
         }
     }
     0

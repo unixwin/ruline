@@ -1675,6 +1675,9 @@ static int test_history_nav(void) {
     add_history("two");
     add_history("three");
     using_history();
+    /* The vi section above ran a history fetch, which leaves GNU's saved line
+     * installed; return to the current line so this test starts clean. */
+    CHECK(rl_end_of_history(1, 0) == 0);
 
     /* No non-incremental search string has been recorded yet. */
     CHECK(rl_noninc_reverse_search_again(1, 0) == 1);
@@ -1765,10 +1768,12 @@ static int test_history_nav(void) {
     CHECK(strcmp(rl_line_buffer, "gamma alpha") == 0);
 
     using_history();
+    CHECK(rl_end_of_history(1, 0) == 0); /* clear the saved line from above */
     rl_replace_line("draft", 0);
     rl_point = rl_end;
     CHECK(rl_reverse_search_history(1, 0) == 0);
-    CHECK(strcmp(rl_line_buffer, "") == 0);
+    /* Starting a search leaves the current line in place, as GNU does. */
+    CHECK(strcmp(rl_line_buffer, "draft") == 0);
     feed_text(rl_reverse_search_history, "alph");
     queue_byte('\n');
     CHECK(rl_reverse_search_history(1, 0) == 0);
@@ -1776,6 +1781,7 @@ static int test_history_nav(void) {
     CHECK(rl_point == 6);
 
     using_history();
+    CHECK(rl_end_of_history(1, 0) == 0); /* clear the search saved line */
     rl_replace_line("draft", 0);
     rl_point = rl_end;
     CHECK(rl_reverse_search_history(1, 0) == 0);
