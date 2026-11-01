@@ -299,6 +299,100 @@ pub(crate) fn variable_value_bytes(name: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Whether the active editing mode is vi.
+pub(crate) fn vi_mode() -> bool {
+    ensure_initialized();
+    matches!(store().editing_mode, EditMode::Vi)
+}
+
+// GNU creates the vi replace keymap lazily in `rl_vi_replace`.  It is not an
+// exported data symbol; keeping one private map mirrors its lifetime without
+// adding another ABI global.
+static mut VI_REPLACE_KEYMAP: Keymap = ptr::null_mut();
+
+/// Build (once) and select GNU's vi replace keymap: printable keys call
+/// `rl_vi_overstrike`, RUBOUT calls `rl_vi_overstrike_delete`, Escape returns
+/// to movement mode, and the remaining control bindings come from the vi
+/// insertion keymap.
+pub(crate) fn set_vi_replace_keymap() {
+    ensure_initialized();
+    unsafe {
+        let mut map = ptr::addr_of!(VI_REPLACE_KEYMAP).read();
+        if map.is_null() {
+            map = make_bare_keymap();
+            if map.is_null() {
+                return;
+            }
+            let insertion = vi_insertion_keymap_ptr();
+            for index in 0..(' ' as usize) {
+                if (*insertion.add(index)).r#type == ISFUNC {
+                    (*map.add(index)).function = (*insertion.add(index)).function;
+                }
+            }
+            let overstrike = function_to_ptr(Some(
+                crate::vi::rl_vi_overstrike as unsafe extern "C" fn(c_int, c_int) -> c_int,
+            ));
+            let overstrike_delete = function_to_ptr(Some(
+                crate::vi::rl_vi_overstrike_delete as unsafe extern "C" fn(c_int, c_int) -> c_int,
+            ));
+            for index in (' ' as usize)..KEYMAP_SIZE {
+                (*map.add(index)).function = overstrike;
+            }
+            (*map.add(RUBOUT as usize)).function = overstrike_delete;
+            (*map.add(ESC)).function = function_to_ptr(Some(
+                crate::vi::rl_vi_movement_mode as unsafe extern "C" fn(c_int, c_int) -> c_int,
+            ));
+            (*map.add(b'\r' as usize)).function = function_to_ptr(Some(
+                crate::editing::rl_newline as unsafe extern "C" fn(c_int, c_int) -> c_int,
+            ));
+            (*map.add(b'\n' as usize)).function = function_to_ptr(Some(
+                crate::editing::rl_newline as unsafe extern "C" fn(c_int, c_int) -> c_int,
+            ));
+            // GNU binds ^H to overstrike-delete when the insertion map uses
+            // backward-delete-char, and leaves ANYOTHERKEY with no function.
+            (*map.add(0x08)).function = overstrike_delete;
+            (*map.add(ANYOTHERKEY)).r#type = ISFUNC;
+            (*map.add(ANYOTHERKEY)).function = ptr::null_mut();
+            ptr::addr_of_mut!(VI_REPLACE_KEYMAP).write(map);
+        }
+        store().current = map;
+    }
+}
+
+/// Whether the private vi replace keymap is currently selected.
+pub(crate) fn vi_replace_keymap_active() -> bool {
+    ensure_initialized();
+    let map = unsafe { ptr::addr_of!(VI_REPLACE_KEYMAP).read() };
+    !map.is_null() && store().current == map
+}
+
+/// Switch the active editing mode to vi and select the insertion keymap, as
+/// GNU's `rl_vi_editing_mode` does through `rl_vi_insert_mode`.
+pub(crate) fn set_vi_mode() {
+    ensure_initialized();
+    let mut state = store();
+    state.editing_mode = EditMode::Vi;
+    state.current = vi_insertion_keymap_ptr();
+}
+
+/// Select the vi insertion keymap without changing the editing-mode flag.
+pub(crate) fn set_vi_insertion_keymap() {
+    ensure_initialized();
+    store().current = vi_insertion_keymap_ptr();
+}
+
+/// Select the vi movement keymap without changing the editing-mode flag.
+pub(crate) fn set_vi_movement_keymap() {
+    ensure_initialized();
+    store().current = vi_movement_keymap_ptr();
+}
+
+/// Whether the vi movement keymap is currently selected.
+pub(crate) fn vi_movement_keymap_active() -> bool {
+    ensure_initialized();
+    store().current == vi_movement_keymap_ptr()
+}
+
 fn ensure_initialized() {
     INIT.call_once(|| {
         fill_keymap(standard_keymap_ptr(), EMACS_STANDARD_KEYMAP_BINDINGS);

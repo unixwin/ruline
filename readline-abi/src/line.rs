@@ -80,6 +80,7 @@ pub(crate) fn initialize_line_state() {
     state::initialize_terminal_name();
     crate::display::initialize_display_state();
     state::reset_line_state();
+    crate::vi::initialize_line();
     state::reset_argument();
     state::set_mark(0);
     state::set_done(0);
@@ -185,6 +186,10 @@ pub unsafe extern "C" fn rl_insert_text(text: *const c_char) -> c_int {
         return 0;
     }
 
+    if !crate::vi::undo_in_progress() {
+        crate::vi::record_insert(point, point + bytes.len() as c_int);
+    }
+
     let tail_len = (end - point) as usize + 1; // include the trailing NUL
     ptr::copy(
         buffer.add(point as usize),
@@ -238,6 +243,16 @@ pub unsafe extern "C" fn rl_delete_text(from: c_int, to: c_int) -> c_int {
     let buffer = state::line_buffer();
     if buffer.is_null() {
         return 0;
+    }
+
+    if !crate::vi::undo_in_progress() {
+        // SAFETY: `start` and `stop` are inside the line buffer and the range
+        // is non-empty after the boundary fixes above.
+        let text = unsafe {
+            std::slice::from_raw_parts(buffer.add(start as usize) as *const u8, removed as usize)
+        }
+        .to_vec();
+        crate::vi::record_delete(start, stop, text);
     }
 
     let remaining = (end - stop) as usize;
