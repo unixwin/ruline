@@ -53,6 +53,36 @@ READLINE_ABI_VENDOR_HEADERS=/path/to/readline \
   python3 readline-abi/scripts/symbol-audit.py --generate-inventory
 ```
 
+## Coverage and benchmarks
+
+`scripts/abi-coverage.py` parses the vendored GNU 8.3 headers, our clean-room
+headers, and the built shared object.  It reports functions, globals, coverage,
+and the missing names grouped by area.  The checked-in snapshot is
+[`abi/coverage.md`](abi/coverage.md):
+
+```sh
+cargo build -p readline-abi --release
+readline-abi/scripts/abi-coverage.py                 # human-readable
+readline-abi/scripts/abi-coverage.py --json          # machine-readable
+readline-abi/scripts/abi-coverage.py --snapshot      # refresh abi/coverage.md
+readline-abi/scripts/abi-coverage.py --snapshot --check  # CI staleness check
+```
+
+The ABI benchmark harness calls the exported C surface through `dlopen`.  It
+covers key-sequence translation, keymap bind/lookup, function-of-keyseq,
+completion with 1,000 candidates, filename completion, line insert/delete at
+1 KiB and 64 KiB, and history add/get at 1k/10k entries:
+
+```sh
+readline-abi/scripts/bench.sh
+BENCH_SAMPLES=41 readline-abi/scripts/bench.sh
+```
+
+The script writes [`BENCH.md`](BENCH.md) with the baseline table, the exact
+command, and notes on complexity, allocations, and observed hot spots.
+[`abi/issue-8-comment.md`](abi/issue-8-comment.md) is a draft comment that turns
+the coverage gaps into implementation slices.
+
 ## Implemented surface
 
 State globals: `rl_line_buffer`, `rl_point`, `rl_end`, `rl_mark`,
