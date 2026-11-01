@@ -54,7 +54,7 @@ following gates, all green on the same commit.
 | --- | --- |
 | ABI coverage | **273 / 439 (62.2%)**, 166 missing — `--require-full` fails |
 | Differential conformance | **239 oracle lines, zero diff** |
-| Plugin matrix | **9 PASS / 0 FAIL / 2 SKIP** (`enable -f` loader, niu loadable builtin) |
+| Plugin matrix | **10 PASS / 1 FAIL / 0 SKIP** — `enable -f` works (rubash#2440); the remaining FAIL is the in-process full-surface export (niubash#775) |
 | Full tests | green except the documented Linux/Android environment set in niubash |
 | Performance | baseline recorded; no threshold regression yet |
 
