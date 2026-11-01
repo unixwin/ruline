@@ -82,13 +82,26 @@ quoting/dequoting hooks, marks directories with `/`, and returns
 `free()`-compatible match arrays.  Username completion reads `/etc/passwd`;
 platforms without it (notably Windows) report no username matches.
 
-Hooks: `rl_startup_hook` and `rl_pre_input_hook` are invoked by `readline()`;
-`rl_redisplay_function` is the repaint indirection used by
-`rl_forced_update_display`, `rl_clear_message`, completion displays and
-`rl_resize_terminal`.  `rl_event_hook`, `rl_input_available_hook`,
-`rl_getc_function`, `rl_prep_term_function` and `rl_deprep_term_function` are
-stored but belong to the host input loop / core readline milestone, which owns
-the event loop and terminal preparation.
+Hooks: `rl_startup_hook` and `rl_pre_input_hook` are invoked by `readline()`
+and by the callback install path; `rl_redisplay_function` is the repaint
+indirection used by `rl_forced_update_display`, `rl_clear_message`, completion
+displays and `rl_resize_terminal`.  `rl_event_hook` is polled while
+`rl_callback_read_char` waits for input, `rl_input_available_hook` reports
+readiness, `rl_getc_function` supplies bytes, and `rl_prep_term_function` /
+`rl_deprep_term_function` wrap terminal preparation when they are set.
+
+Callback and terminal: `rl_callback_handler_install`, `rl_callback_handler_remove`,
+`rl_callback_read_char`, `rl_callback_sigcleanup`, `rl_prep_terminal`,
+`rl_deprep_terminal`, `rl_get_screen_size`, `rl_set_screen_size`,
+`rl_reset_screen_size`, `rl_set_signals`, `rl_clear_signals`,
+`rl_cleanup_after_signal`, `rl_reset_after_signal`, `rl_clear_pending_input`.
+`rl_callback_read_char` dispatches through the active keymap (one sub-keymap
+level and macro expansion), honours `rl_pending_input`, and delivers completed
+lines, EOF (Ctrl-D) and interrupts (Ctrl-C) to the installed handler.  On Unix,
+`rl_set_signals` catches `SIGINT` and `SIGWINCH`; the resize path refreshes the
+cached size and repaints, and the interrupt path restores the terminal before
+delivering the signal to the application's previous handler.  Other GNU-caught
+signals and non-Unix console signal mapping are not part of this slice yet.
 
 History: `add_history`, `add_history_time`, `clear_history`, `using_history`,
 `stifle_history`, `unstifle_history`, `history_is_stifled`, `where_history`,
@@ -141,13 +154,14 @@ is not declared.  There are no silent stubs.
 - Direct callers of `rl_menu_complete` must set `rl_last_func` the way the
   readline dispatcher does, otherwise each call starts a new menu cycle.
 - `rl_event_hook`, `rl_input_available_hook`, `rl_getc_function`,
-  `rl_prep_term_function` and `rl_deprep_term_function` have storage but no
-  invocation point in this standalone crate; they belong to the core input
-  loop milestone.
+  `rl_prep_term_function` and `rl_deprep_term_function` are live in the
+  callback input loop, but `readline()` still reads through Reedline rather
+  than that loop.
 - `rl_push_macro_input`, the keyboard-macro recording commands,
   `rl_get_termcap`, `rl_change_environment`, and `rl_explicit_arg` are not
-  implemented yet. Callbacks, signals, kill ring, undo, and history
-  expansion/search remain future slices.
+  implemented yet. The rest of the signal set (SIGTERM/SIGHUP/SIGQUIT/
+  SIGALRM/SIGTSTP/SIGTTIN/SIGTTOU), kill ring, undo, and history expansion/
+  search remain future slices.
 - The history store is an in-process vector; it does not use
   `FileBackedHistory` or persist automatically.
 - Only `libreadline.so.8` packaging exists; a separate `libhistory.so.8`

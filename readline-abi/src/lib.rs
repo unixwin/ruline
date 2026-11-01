@@ -9,6 +9,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::missing_safety_doc)]
 
+mod callback;
 mod completion;
 mod history;
 mod interactive;
@@ -16,8 +17,12 @@ mod keymap;
 mod keymap_defaults;
 mod line;
 mod state;
+mod terminal;
 
+pub use callback::*;
 pub use completion::*;
 pub use history::*;
 pub use interactive::*;
 pub use line::*;
+pub use state::*;
+pub use terminal::*;

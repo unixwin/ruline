@@ -10,6 +10,7 @@ use reedline::{Prompt, PromptEditMode, PromptHistorySearch, Reedline, Signal};
 use crate::completion;
 use crate::line;
 use crate::state;
+use crate::terminal;
 
 struct AbiPrompt {
     text: String,
@@ -96,9 +97,15 @@ pub unsafe extern "C" fn readline(prompt: *const c_char) -> *mut c_char {
         text: prompt_text(),
     };
 
+    // GNU readline puts the terminal in editing mode and installs its signal
+    // handlers around readline_internal(); both are restored before returning.
+    terminal::prep_for_input();
+    // SAFETY: signal dispositions are restored below.
+    unsafe { terminal::rl_set_signals() };
+
     completion::run_pre_input_hook();
 
-    match editor.read_line(&prompt) {
+    let result = match editor.read_line(&prompt) {
         Ok(Signal::Success(buffer)) => {
             line::set_line_bytes(buffer.as_bytes());
             mark_done();
@@ -127,5 +134,11 @@ pub unsafe extern "C" fn readline(prompt: *const c_char) -> *mut c_char {
             ptr::null_mut()
         }
         Err(_) => ptr::null_mut(),
-    }
+    };
+
+    terminal::deprep_for_input();
+    // SAFETY: restores the application's signal dispositions.
+    unsafe { terminal::rl_clear_signals() };
+
+    result
 }
