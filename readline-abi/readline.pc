@@ -1,0 +1,10 @@
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: readline
+Description: GNU readline-compatible line editing library provided by ruline (ABI subset)
+Version: 8.3
+Libs: -L${libdir} -lreadline
+Cflags: -I${includedir}

@@ -1,0 +1,17 @@
+[package]
+name = "readline-abi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95.0"
+license = "MIT"
+description = "Clean-room GNU readline 8.x C ABI adapter for ruline"
+publish = false
+
+[lib]
+# The installed ABI name must be libreadline, not libreadline_abi.
+name = "readline"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+libc = "0.2"
+reedline = { path = ".." }

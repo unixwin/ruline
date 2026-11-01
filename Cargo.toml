@@ -69,3 +69,7 @@ required-features = ["system_clipboard"]
 # Whether to pass `--all-features` to Cargo (default: false)
 all-features = false
 features = ["bashisms"]
+
+[workspace]
+members = ["readline-abi"]
+resolver = "2"
