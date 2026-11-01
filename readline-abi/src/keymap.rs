@@ -271,6 +271,14 @@ pub(crate) fn emacs_mode() -> bool {
     matches!(store().editing_mode, EditMode::Emacs)
 }
 
+/// Switch the active editing mode to Emacs and select its standard keymap.
+pub(crate) fn set_emacs_mode() {
+    ensure_initialized();
+    let mut state = store();
+    state.editing_mode = EditMode::Emacs;
+    state.current = standard_keymap_ptr();
+}
+
 fn ensure_initialized() {
     INIT.call_once(|| {
         fill_keymap(standard_keymap_ptr(), EMACS_STANDARD_KEYMAP_BINDINGS);

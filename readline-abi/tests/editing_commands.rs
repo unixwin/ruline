@@ -6,7 +6,7 @@
 //! behaviour checked by `cargo test` without needing `cc`.
 
 use std::ffi::{CStr, CString};
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_void};
 use std::sync::{Mutex, MutexGuard};
 
 type Command = unsafe extern "C" fn(c_int, c_int) -> c_int;
@@ -268,4 +268,204 @@ fn add_defun_resolves_the_same_real_body() {
     // SAFETY: `resolved` is the bindable forward-char command.
     assert_eq!(unsafe { resolved.unwrap()(1, 0) }, 0);
     assert_eq!(point(), 1);
+}
+
+#[test]
+fn exported_commands_are_the_funmap_bodies() {
+    let _guard = lock();
+    // SAFETY: the test lock serialises access to the global ABI state.
+    unsafe { readline::rl_initialize() };
+
+    let pairs: [(&str, Command); 12] = [
+        ("self-insert", readline::rl_insert),
+        ("accept-line", readline::rl_newline),
+        ("backward-delete-char", readline::rl_rubout),
+        ("delete-char", readline::rl_delete),
+        ("beginning-of-line", readline::rl_beg_of_line),
+        ("end-of-line", readline::rl_end_of_line),
+        ("forward-char", readline::rl_forward_char),
+        ("backward-char", readline::rl_backward_char),
+        ("forward-word", readline::rl_forward_word),
+        ("kill-line", readline::rl_kill_line),
+        ("yank", readline::rl_yank),
+        ("transpose-chars", readline::rl_transpose_chars),
+    ];
+    for (name, exported) in pairs {
+        let resolved = command(name);
+        assert!(
+            std::ptr::fn_addr_eq(resolved, exported),
+            "{name} is not the exported symbol"
+        );
+    }
+}
+
+#[test]
+fn direct_movement_insert_delete_abi() {
+    let _guard = lock();
+    // SAFETY: the test lock serialises access to the global ABI state.
+    unsafe { readline::rl_initialize() };
+
+    set_line("one two three");
+    set_point(0);
+    // SAFETY: exported commands take (count, key).
+    assert_eq!(unsafe { readline::rl_forward_word(1, 0) }, 0);
+    assert_eq!(point(), 3);
+    assert_eq!(unsafe { readline::rl_forward(2, 0) }, 0);
+    assert_eq!(point(), 5);
+    assert_eq!(unsafe { readline::rl_backward(1, 0) }, 0);
+    assert_eq!(point(), 4);
+    assert_eq!(unsafe { readline::rl_beg_of_line(1, 0) }, 0);
+    assert_eq!(point(), 0);
+    assert_eq!(unsafe { readline::rl_end_of_line(1, 0) }, 0);
+    assert_eq!(point(), 13);
+    assert_eq!(unsafe { readline::rl_backward_byte(1, 0) }, 0);
+    assert_eq!(point(), 12);
+    assert_eq!(unsafe { readline::rl_forward_byte(1, 0) }, 0);
+    assert_eq!(point(), 13);
+
+    set_line("ac");
+    set_point(1);
+    // SAFETY: exported commands take (count, key).
+    assert_eq!(unsafe { readline::rl_insert(1, b'b' as c_int) }, 0);
+    assert_eq!((line(), point()), ("abc".to_string(), 2));
+    assert_eq!(unsafe { readline::rl_tab_insert(1, 0) }, 0);
+    assert_eq!(line(), "ab\tc");
+    assert_eq!(unsafe { readline::rl_delete(1, 0) }, 0);
+    assert_eq!((line(), point()), ("ab\t".to_string(), 3));
+    assert_eq!(unsafe { readline::rl_rubout(1, 0) }, 0);
+    assert_eq!((line(), point()), ("ab".to_string(), 2));
+    assert_eq!(unsafe { readline::rl_rubout_or_delete(1, 0) }, 0);
+    assert_eq!((line(), point()), ("a".to_string(), 1));
+}
+
+#[test]
+fn direct_mark_region_and_predicates() {
+    let _guard = lock();
+    // SAFETY: the test lock serialises access to the global ABI state.
+    unsafe { readline::rl_initialize() };
+
+    // SAFETY: mark-active state is process-wide.
+    unsafe { readline::rl_deactivate_mark() };
+    assert_eq!(unsafe { readline::rl_mark_active_p() }, 0);
+    // SAFETY: mark-active state is process-wide.
+    unsafe { readline::rl_activate_mark() };
+    assert_eq!(unsafe { readline::rl_mark_active_p() }, 1);
+    // SAFETY: mark-active state is process-wide.
+    unsafe { readline::rl_keep_mark_active() };
+    assert_eq!(unsafe { readline::rl_mark_active_p() }, 1);
+    unsafe { readline::rl_deactivate_mark() };
+    assert_eq!(unsafe { readline::rl_mark_active_p() }, 0);
+
+    set_line("hello");
+    set_point(0);
+    unsafe { readline::rl_mark = 3 };
+    // Exchange activates the region in GNU's text.c.
+    assert_eq!(unsafe { readline::rl_exchange_point_and_mark(1, 0) }, 0);
+    assert_eq!((point(), mark()), (3, 0));
+    assert_eq!(unsafe { readline::rl_mark_active_p() }, 1);
+
+    // SAFETY: predicates do not touch the line.
+    unsafe {
+        assert_eq!(readline::rl_alphabetic(b'a' as c_int), 1);
+        assert_eq!(readline::rl_alphabetic(b'0' as c_int), 1);
+        assert_eq!(readline::rl_alphabetic(b' ' as c_int), 0);
+        assert_eq!(readline::alphabetic(b'Z' as c_int), 1);
+        assert_eq!(readline::ding(), 0);
+    }
+
+    let copy = unsafe { readline::rl_copy_text(0, 2) };
+    assert!(!copy.is_null());
+    // SAFETY: `copy` came from rl_copy_text's malloc and is handed back once.
+    unsafe { readline::rl_free(copy as *mut c_void) };
+}
+
+#[test]
+fn exported_kill_copy_and_yank_share_the_ring() {
+    let _guard = lock();
+    // SAFETY: the test lock serialises access to the global ABI state.
+    unsafe { readline::rl_initialize() };
+
+    set_line("one two");
+    set_point(0);
+    // SAFETY: exported commands take (count, key).
+    assert_eq!(unsafe { readline::rl_kill_word(1, 0) }, 0);
+    assert_eq!(line(), " two");
+    // A non-kill command ends the kill sequence, matching dispatch.
+    assert_eq!(unsafe { readline::rl_beg_of_line(1, 0) }, 0);
+
+    set_line("three four");
+    set_point(0);
+    assert_eq!(unsafe { readline::rl_kill_word(1, 0) }, 0);
+    assert_eq!(line(), " four");
+    assert_eq!(unsafe { readline::rl_yank(1, 0) }, 0);
+    assert_eq!(line(), "three four");
+    assert_eq!(unsafe { readline::rl_yank_pop(1, 0) }, 0);
+    assert_eq!(line(), "one four");
+    assert_eq!(point(), 3);
+
+    set_line("abcdef");
+    set_point(1);
+    unsafe { readline::rl_mark = 4 };
+    assert_eq!(unsafe { readline::rl_copy_region_to_kill(1, 0) }, 0);
+    assert_eq!((line(), point(), mark()), ("abcdef".to_string(), 1, 4));
+    assert_eq!(unsafe { readline::rl_kill_region(1, 0) }, 0);
+    assert_eq!((line(), point()), ("aef".to_string(), 1));
+
+    set_line("abc");
+    set_point(2);
+    assert_eq!(unsafe { readline::rl_unix_line_discard(1, 0) }, 0);
+    assert_eq!((line(), point()), ("c".to_string(), 0));
+
+    set_line("src/foo.c");
+    set_point(9);
+    assert_eq!(unsafe { readline::rl_unix_filename_rubout(1, 0) }, 0);
+    assert_eq!((line(), point()), ("src/".to_string(), 4));
+}
+
+#[test]
+fn modes_newline_and_argument_discard_are_exported() {
+    let _guard = lock();
+    // SAFETY: the test lock serialises access to the global ABI state.
+    unsafe { readline::rl_initialize() };
+
+    let editing = CString::new("editing-mode").unwrap();
+    let vi = CString::new("vi").unwrap();
+    assert_eq!(
+        unsafe { readline::rl_variable_bind(editing.as_ptr(), vi.as_ptr()) },
+        0
+    );
+    assert_eq!(unsafe { readline::rl_emacs_editing_mode(1, 0) }, 0);
+    assert_eq!(unsafe { readline::rl_insert_mode }, 1);
+    let name = unsafe { readline::rl_get_keymap_name(readline::rl_get_keymap()) };
+    assert_eq!(unsafe { CStr::from_ptr(name) }.to_bytes(), b"emacs");
+
+    // SAFETY: numeric-argument globals are exported.
+    unsafe {
+        readline::rl_explicit_arg = 1;
+        readline::rl_numeric_arg = 7;
+    }
+    assert_eq!(unsafe { readline::rl_discard_argument() }, 0);
+    // SAFETY: plain scalar reads through raw pointers avoid borrowing the
+    // mutable statics.
+    unsafe {
+        assert_eq!(std::ptr::addr_of!(readline::rl_explicit_arg).read(), 0);
+        assert_eq!(std::ptr::addr_of!(readline::rl_numeric_arg).read(), 1);
+    }
+    assert_eq!(
+        unsafe { readline::rl_do_lowercase_version(1, b'A' as c_int) },
+        99999
+    );
+
+    unsafe extern "C" fn no_redisplay() {}
+    // SAFETY: the test lock serialises process-wide hook state.
+    let previous = unsafe { readline::rl_redisplay_function };
+    unsafe { readline::rl_redisplay_function = Some(no_redisplay) };
+    unsafe {
+        readline::rl_activate_mark();
+        readline::rl_done = 0;
+        assert_eq!(readline::rl_newline(1, 0), 0);
+        assert_eq!(std::ptr::addr_of!(readline::rl_done).read(), 1);
+        assert_eq!(readline::rl_mark_active_p(), 0);
+    }
+    unsafe { readline::rl_redisplay_function = previous };
 }
