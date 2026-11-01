@@ -522,6 +522,182 @@ int main(void) {
         rl_redisplay_function = saved_redisplay;
     }
 
+    section("vi");
+    rl_vi_editing_mode(1, 0);
+    value("vi.insert-keymap", rl_get_keymap_name(rl_get_keymap()));
+    integer("vi.insert-mode", rl_insert_mode);
+    rl_vi_movement_mode(1, 0);
+    value("vi.movement-keymap", rl_get_keymap_name(rl_get_keymap()));
+
+    rl_replace_line("abc", 0);
+    rl_point = 3;
+    integer("vi.check.rc", rl_vi_check());
+    integer("vi.check.point", rl_point);
+
+    rl_replace_line("one two three", 0);
+    rl_point = 0;
+    integer("vi.fword.rc", rl_vi_fword(1, 'w'));
+    integer("vi.fword.point", rl_point);
+    integer("vi.bword.rc", rl_vi_bword(1, 'b'));
+    integer("vi.bword.point", rl_point);
+    integer("vi.eword.rc", rl_vi_eword(1, 'e'));
+    integer("vi.eword.point", rl_point);
+    integer("vi.next.rc", rl_vi_next_word(1, 'w'));
+    integer("vi.next.point", rl_point);
+    integer("vi.end.rc", rl_vi_end_word(1, 'e'));
+    integer("vi.end.point", rl_point);
+    integer("vi.prev.rc", rl_vi_prev_word(1, 'b'));
+    integer("vi.prev.point", rl_point);
+
+    rl_replace_line("a.b c", 0);
+    rl_point = 0;
+    integer("vi.fWord.rc", rl_vi_fWord(1, 'W'));
+    integer("vi.fWord.point", rl_point);
+    integer("vi.bWord.rc", rl_vi_bWord(1, 'B'));
+    integer("vi.bWord.point", rl_point);
+    integer("vi.eWord.rc", rl_vi_eWord(1, 'E'));
+    integer("vi.eWord.point", rl_point);
+
+    rl_replace_line("   abc", 0);
+    rl_point = 0;
+    integer("vi.first_print.rc", rl_vi_first_print(1, '^'));
+    integer("vi.first_print.point", rl_point);
+    integer("vi.back_to_indent.rc", rl_vi_back_to_indent(1, '^'));
+    integer("vi.back_to_indent.point", rl_point);
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    integer("vi.column.rc", rl_vi_column(3, '|'));
+    integer("vi.column.point", rl_point);
+
+    rl_replace_line("one two three", 0);
+    rl_point = 0;
+    rl_mark = 0;
+    rl_pending_input = 'w';
+    integer("vi.dw.rc", rl_vi_delete_to(1, 'd'));
+    value("vi.dw.line", rl_line_buffer);
+    integer("vi.dw.point", rl_point);
+    integer("vi.dw.end", rl_end);
+    integer("vi.dw.mark", rl_mark);
+    integer("vi.dw.undo.rc", rl_vi_undo(1, 'u'));
+    value("vi.dw.undo.line", rl_line_buffer);
+    integer("vi.dw.undo.point", rl_point);
+
+    rl_replace_line("abcdef", 0);
+    rl_point = 2;
+    integer("vi.delete.rc", rl_vi_delete(1, 'x'));
+    value("vi.delete.line", rl_line_buffer);
+    integer("vi.delete.point", rl_point);
+    integer("vi.delete.undo.rc", rl_vi_undo(1, 'u'));
+    value("vi.delete.undo.line", rl_line_buffer);
+    integer("vi.delete.undo.point", rl_point);
+
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    rl_pending_input = 'w';
+    integer("vi.change.rc", rl_vi_change_to(1, 'c'));
+    value("vi.change.line", rl_line_buffer);
+    integer("vi.change.point", rl_point);
+    value("vi.change.keymap", rl_get_keymap_name(rl_get_keymap()));
+    integer("vi.change.insert.rc", rl_insert(1, 'X'));
+    value("vi.change.insert.line", rl_line_buffer);
+    rl_vi_movement_mode(1, 0);
+    integer("vi.change.undo.rc", rl_vi_undo(1, 'u'));
+    value("vi.change.undo.line", rl_line_buffer);
+
+    rl_replace_line("abcdef", 0);
+    rl_point = 1;
+    rl_pending_input = 'X';
+    integer("vi.change_char.rc", rl_vi_change_char(2, 'r'));
+    value("vi.change_char.line", rl_line_buffer);
+    integer("vi.change_char.point", rl_point);
+    rl_replace_line("aBc def", 0);
+    rl_point = 0;
+    integer("vi.change_case.rc", rl_vi_change_case(2, '~'));
+    value("vi.change_case.line", rl_line_buffer);
+    integer("vi.change_case.point", rl_point);
+
+    rl_replace_line("abcde", 0);
+    rl_point = 1;
+    integer("vi.overstrike.rc", rl_vi_overstrike(1, 'X'));
+    value("vi.overstrike.line", rl_line_buffer);
+    integer("vi.overstrike.point", rl_point);
+    integer("vi.overstrike_delete.rc", rl_vi_overstrike_delete(1, 127));
+    value("vi.overstrike_delete.line", rl_line_buffer);
+    rl_vi_movement_mode(1, 0);
+
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    integer("vi.replace.rc", rl_vi_replace(1, 'R'));
+    integer("vi.replace.insert_mode", rl_insert_mode);
+    value("vi.replace.keymap", rl_get_keymap_name(rl_get_keymap()));
+    rl_vi_movement_mode(1, 0);
+
+    rl_replace_line("abc", 0);
+    rl_point = 2;
+    integer("vi.rubout.rc", rl_vi_rubout(1, 8));
+    value("vi.rubout.line", rl_line_buffer);
+    rl_replace_line("foo bar", 0);
+    rl_point = 7;
+    integer("vi.unix_word_rubout.rc", rl_vi_unix_word_rubout(1, 23));
+    value("vi.unix_word_rubout.line", rl_line_buffer);
+
+    rl_replace_line("a,b,c", 0);
+    rl_point = 0;
+    rl_pending_input = ',';
+    integer("vi.char_search.rc", rl_vi_char_search(1, 'f'));
+    integer("vi.char_search.point", rl_point);
+    integer("vi.char_search_again.rc", rl_vi_char_search(1, ';'));
+    integer("vi.char_search_again.point", rl_point);
+    integer("vi.char_search_reverse.rc", rl_vi_char_search(1, ','));
+    integer("vi.char_search_reverse.point", rl_point);
+    rl_pending_input = 'a';
+    integer("vi.set_mark.rc", rl_vi_set_mark(1, 'm'));
+    rl_point = 4;
+    rl_pending_input = 'a';
+    integer("vi.goto_mark.rc", rl_vi_goto_mark(1, '`'));
+    integer("vi.goto_mark.point", rl_point);
+
+    rl_replace_line("(abc)", 0);
+    rl_point = 0;
+    integer("vi.bracktype.open", rl_vi_bracktype('('));
+    integer("vi.bracktype.close", rl_vi_bracktype(']'));
+    integer("vi.match.rc", rl_vi_match(1, '%'));
+    integer("vi.match.point", rl_point);
+
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    rl_kill_text(1, 2);
+    rl_vi_movement_mode(1, 0);
+    rl_replace_line("q", 0);
+    rl_point = 1;
+    integer("vi.put.rc", rl_vi_put(1, 'p'));
+    value("vi.put.line", rl_line_buffer);
+    integer("vi.put.point", rl_point);
+
+    clear_history();
+    add_history("cmd one two");
+    add_history("echo alpha beta");
+    using_history();
+    rl_replace_line("", 0);
+    rl_explicit_arg = 1;
+    rl_numeric_arg = 1;
+    integer("vi.fetch.rc", rl_vi_fetch_history(1, 'G'));
+    value("vi.fetch.line", rl_line_buffer);
+    integer("vi.fetch.point", rl_point);
+    integer("vi.fetch.mark", rl_mark);
+    rl_explicit_arg = 0;
+    rl_numeric_arg = 1;
+
+    using_history();
+    rl_replace_line("x", 0);
+    rl_point = 0;
+    integer("vi.yank_arg.rc", rl_vi_yank_arg(1, ':'));
+    value("vi.yank_arg.line", rl_line_buffer);
+    integer("vi.yank_arg.point", rl_point);
+    rl_vi_movement_mode(1, 0);
+    clear_history();
+    rl_emacs_editing_mode(1, 0);
+
     section("keyseq");
     print_keyseq("translate.control", "\\C-x");
     print_keyseq("translate.meta", "\\M-x");

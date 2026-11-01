@@ -17,20 +17,20 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 | Surface | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: |
-| Functions | 238 | 329 | 72.3% | 91 |
+| Functions | 288 | 329 | 87.5% | 41 |
 | Globals | 96 | 110 | 87.3% | 14 |
-| **All** | **334** | **439** | **76.1%** | **105** |
+| **All** | **384** | **439** | **87.5%** | **55** |
 
 ## By area
 
 | Area | Functions | Globals | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | state | 6/6 | 25/25 | 31 | 31 | 100.0% | 0 |
-| text | 93/140 | 0/0 | 93 | 140 | 66.4% | 47 |
+| text | 140/140 | 0/0 | 140 | 140 | 100.0% | 0 |
 | keymap | 51/53 | 8/12 | 59 | 65 | 90.8% | 6 |
 | completion | 12/18 | 33/36 | 45 | 54 | 83.3% | 9 |
 | hooks | 0/0 | 8/11 | 8 | 11 | 72.7% | 3 |
-| history | 36/56 | 19/19 | 55 | 75 | 73.3% | 20 |
+| history | 39/56 | 19/19 | 58 | 75 | 77.3% | 17 |
 | callbacks | 4/4 | 0/0 | 4 | 4 | 100.0% | 0 |
 | terminal | 8/22 | 0/0 | 8 | 22 | 36.4% | 14 |
 | display | 23/23 | 3/3 | 26 | 26 | 100.0% | 0 |
@@ -38,28 +38,13 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 ## Top missing groups
 
-1. **text** — 47 missing (93/140 implemented)
-2. **history** — 20 missing (55/75 implemented)
-3. **terminal** — 14 missing (8/22 implemented)
-4. **completion** — 9 missing (45/54 implemented)
-5. **keymap** — 6 missing (59/65 implemented)
+1. **history** — 17 missing (58/75 implemented)
+2. **terminal** — 14 missing (8/22 implemented)
+3. **completion** — 9 missing (45/54 implemented)
+4. **keymap** — 6 missing (59/65 implemented)
+5. **misc** — 6 missing (5/11 implemented)
 
 ## Missing symbols
-
-### text (47)
-
-`rl_vi_append_eol` `rl_vi_append_mode` `rl_vi_arg_digit` `rl_vi_bWord`
-`rl_vi_back_to_indent` `rl_vi_bracktype` `rl_vi_bword` `rl_vi_change_case`
-`rl_vi_change_char` `rl_vi_change_to` `rl_vi_char_search` `rl_vi_check`
-`rl_vi_column` `rl_vi_delete` `rl_vi_delete_to` `rl_vi_domove`
-`rl_vi_eWord` `rl_vi_editing_mode` `rl_vi_end_word` `rl_vi_eof_maybe`
-`rl_vi_eword` `rl_vi_fWord` `rl_vi_first_print` `rl_vi_fword`
-`rl_vi_goto_mark` `rl_vi_insert_beg` `rl_vi_insert_mode` `rl_vi_insertion_mode`
-`rl_vi_match` `rl_vi_movement_mode` `rl_vi_next_word` `rl_vi_overstrike`
-`rl_vi_overstrike_delete` `rl_vi_prev_word` `rl_vi_put` `rl_vi_redo`
-`rl_vi_replace` `rl_vi_rubout` `rl_vi_set_mark` `rl_vi_start_inserting`
-`rl_vi_subst` `rl_vi_tilde_expand` `rl_vi_undo` `rl_vi_unix_word_rubout`
-`rl_vi_yank_arg` `rl_vi_yank_pop` `rl_vi_yank_to`
 
 ### keymap (6)
 
@@ -76,13 +61,13 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 `rl_macro_display_hook` `rl_signal_event_hook` `rl_timeout_event_hook`
 
-### history (20)
+### history (17)
 
 `rl_beginning_of_history` `rl_clear_history` `rl_end_of_history` `rl_fetch_history`
 `rl_forward_search_history` `rl_get_next_history` `rl_get_previous_history` `rl_history_search_backward`
 `rl_history_search_forward` `rl_history_substr_search_backward` `rl_history_substr_search_forward` `rl_noninc_forward_search`
 `rl_noninc_forward_search_again` `rl_noninc_reverse_search` `rl_noninc_reverse_search_again` `rl_operate_and_get_next`
-`rl_reverse_search_history` `rl_vi_fetch_history` `rl_vi_search` `rl_vi_search_again`
+`rl_reverse_search_history`
 
 ### terminal (14)
 
@@ -102,6 +87,6 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 ## Audit notes
 
-- Library: `target/debug/libreadline.so` (335 ABI exports).
-- Headers: 335 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
+- Library: `target/debug/libreadline.so` (385 ABI exports).
+- Headers: 385 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
 - The ten legacy compatibility aliases wrapped in `#if 0` in the GNU header are included in the denominator: GNU's `compat.c` still exports them in `libreadline.so.8`.

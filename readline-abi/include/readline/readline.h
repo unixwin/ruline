@@ -417,6 +417,60 @@ extern int rl_emacs_editing_mode(int, int);
 extern int rl_digit_argument(int, int);
 extern int rl_universal_argument(int, int);
 
+/* Vi-mode commands.  The standalone bodies operate on the line buffer; the
+ * commands that need a following key consume `rl_pending_input` and otherwise
+ * fail rather than blocking on a terminal read. */
+extern int rl_vi_editing_mode(int, int);
+extern int rl_vi_insertion_mode(int, int);
+extern int rl_vi_insert_mode(int, int);
+extern int rl_vi_movement_mode(int, int);
+extern void rl_vi_start_inserting(int, int, int);
+extern int rl_vi_check(void);
+extern int rl_vi_bracktype(int);
+extern int rl_vi_domove(int, int *);
+extern int rl_vi_append_eol(int, int);
+extern int rl_vi_append_mode(int, int);
+extern int rl_vi_insert_beg(int, int);
+extern int rl_vi_fword(int, int);
+extern int rl_vi_bword(int, int);
+extern int rl_vi_eword(int, int);
+extern int rl_vi_fWord(int, int);
+extern int rl_vi_bWord(int, int);
+extern int rl_vi_eWord(int, int);
+extern int rl_vi_next_word(int, int);
+extern int rl_vi_prev_word(int, int);
+extern int rl_vi_end_word(int, int);
+extern int rl_vi_column(int, int);
+extern int rl_vi_first_print(int, int);
+extern int rl_vi_back_to_indent(int, int);
+extern int rl_vi_match(int, int);
+extern int rl_vi_char_search(int, int);
+extern int rl_vi_goto_mark(int, int);
+extern int rl_vi_set_mark(int, int);
+extern int rl_vi_delete(int, int);
+extern int rl_vi_delete_to(int, int);
+extern int rl_vi_change_to(int, int);
+extern int rl_vi_change_char(int, int);
+extern int rl_vi_change_case(int, int);
+extern int rl_vi_subst(int, int);
+extern int rl_vi_replace(int, int);
+extern int rl_vi_overstrike(int, int);
+extern int rl_vi_overstrike_delete(int, int);
+extern int rl_vi_rubout(int, int);
+extern int rl_vi_unix_word_rubout(int, int);
+extern int rl_vi_tilde_expand(int, int);
+extern int rl_vi_put(int, int);
+extern int rl_vi_yank_to(int, int);
+extern int rl_vi_yank_arg(int, int);
+extern int rl_vi_yank_pop(int, int);
+extern int rl_vi_undo(int, int);
+extern int rl_vi_redo(int, int);
+extern int rl_vi_arg_digit(int, int);
+extern int rl_vi_fetch_history(int, int);
+extern int rl_vi_search(int, int);
+extern int rl_vi_search_again(int, int);
+extern int rl_vi_eof_maybe(int, int);
+
 /* Active-region support.  `rl_mark_active_p` reports whether the region is
  * active; `rl_keep_mark_active` preserves it for the current command. */
 extern void rl_activate_mark(void);

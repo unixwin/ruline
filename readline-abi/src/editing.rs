@@ -61,7 +61,7 @@ fn mark_is_active() -> bool {
 
 // --- Line-buffer helpers --------------------------------------------------
 
-fn line_slice<'a>() -> &'a [u8] {
+pub(crate) fn line_slice<'a>() -> &'a [u8] {
     let buffer = state::line_buffer();
     let end = state::end().max(0) as usize;
     if buffer.is_null() {
@@ -72,14 +72,14 @@ fn line_slice<'a>() -> &'a [u8] {
     }
 }
 
-fn byte_at(position: c_int) -> Option<u8> {
+pub(crate) fn byte_at(position: c_int) -> Option<u8> {
     if position < 0 {
         return None;
     }
     line_slice().get(position as usize).copied()
 }
 
-fn insert_bytes(bytes: &[u8]) -> c_int {
+pub(crate) fn insert_bytes(bytes: &[u8]) -> c_int {
     if bytes.is_empty() {
         return 0;
     }
@@ -90,12 +90,12 @@ fn insert_bytes(bytes: &[u8]) -> c_int {
     unsafe { crate::line::rl_insert_text(terminated.as_ptr() as *const c_char) }
 }
 
-fn delete_range(from: c_int, to: c_int) -> c_int {
+pub(crate) fn delete_range(from: c_int, to: c_int) -> c_int {
     // SAFETY: the exported helper clamps both endpoints itself.
     unsafe { crate::line::rl_delete_text(from, to) }
 }
 
-fn copy_range(from: c_int, to: c_int) -> Vec<u8> {
+pub(crate) fn copy_range(from: c_int, to: c_int) -> Vec<u8> {
     // SAFETY: the exported helper returns a malloc-compatible string.
     let copy = unsafe { crate::line::rl_copy_text(from, to) };
     if copy.is_null() {
@@ -108,7 +108,7 @@ fn copy_range(from: c_int, to: c_int) -> Vec<u8> {
     bytes
 }
 
-fn ring_bell() {
+pub(crate) fn ring_bell() {
     // SAFETY: rl_ding only writes a bell to stderr.
     unsafe {
         crate::line::rl_ding();
@@ -149,7 +149,7 @@ fn character_len(bytes: &[u8], position: usize) -> usize {
     }
 }
 
-fn next_position(bytes: &[u8], position: usize, count: c_int) -> usize {
+pub(crate) fn next_position(bytes: &[u8], position: usize, count: c_int) -> usize {
     let mut position = position.min(bytes.len());
     for _ in 0..count.max(0) {
         if position >= bytes.len() {
@@ -160,7 +160,7 @@ fn next_position(bytes: &[u8], position: usize, count: c_int) -> usize {
     position
 }
 
-fn previous_position(bytes: &[u8], position: usize, count: c_int) -> usize {
+pub(crate) fn previous_position(bytes: &[u8], position: usize, count: c_int) -> usize {
     let mut position = position.min(bytes.len());
     for _ in 0..count.max(0) {
         if position == 0 {
@@ -200,7 +200,7 @@ fn word_at(bytes: &[u8], position: usize) -> bool {
     }
 }
 
-fn whitespace(byte: u8) -> bool {
+pub(crate) fn whitespace(byte: u8) -> bool {
     byte == b' ' || byte == b'\t'
 }
 
@@ -239,8 +239,16 @@ fn add_kill(text: Vec<u8>, append: bool) {
         return;
     }
 
-    // Consecutive kills coalesce in the newest slot.  GNU only does this in
-    // emacs mode; vi mode is not part of this standalone slice.
+    // GNU never coalesces consecutive kills in vi mode: the newest kill
+    // replaces the current slot instead of being appended or prepended.
+    if crate::keymap::vi_mode() {
+        let slot = ring.items.len() - 1;
+        ring.items[slot] = text;
+        ring.index = slot;
+        return;
+    }
+
+    // Emacs coalesces consecutive kills in the newest slot.
     let slot = ring.items.len() - 1;
     let old = std::mem::take(&mut ring.items[slot]);
     let mut combined = Vec::with_capacity(old.len() + text.len());
@@ -262,6 +270,25 @@ fn record_kill() {
 
 fn current_kill() -> Option<Vec<u8>> {
     let ring = ring();
+    ring.items.get(ring.index).cloned()
+}
+
+pub(crate) fn kill_ring_current() -> Option<Vec<u8>> {
+    current_kill()
+}
+
+/// Rotate the kill ring backwards and return the newly selected slot.  This is
+/// the ring half of `yank-pop` and of vi's `p`/`P` pop command.
+pub(crate) fn kill_ring_rotate_back() -> Option<Vec<u8>> {
+    let mut ring = ring();
+    if ring.items.is_empty() {
+        return None;
+    }
+    ring.index = if ring.index == 0 {
+        ring.items.len() - 1
+    } else {
+        ring.index - 1
+    };
     ring.items.get(ring.index).cloned()
 }
 
@@ -346,9 +373,16 @@ pub(crate) fn insert(count: c_int, key: c_int) -> c_int {
     if count <= 0 {
         return 0;
     }
+    // In GNU the vi replace keymap dispatches printable keys to
+    // `rl_vi_overstrike`.  The standalone adapter has no dispatcher, so the
+    // self-insert command consults the selected map.
+    if crate::keymap::vi_replace_keymap_active() && (0x20..=0xff).contains(&key) {
+        return crate::vi::overstrike(count, key);
+    }
     // GNU stores the dispatched key in a C `char`, so out-of-range values wrap
     // to a single byte.  A zero key inserts nothing.
     insert_repeated(key as u8, count, state::insert_mode() == RL_IM_OVERWRITE);
+    crate::vi::note_self_insert(key, count);
     0
 }
 
@@ -373,11 +407,13 @@ pub(crate) fn quoted_insert(count: c_int, _key: c_int) -> c_int {
         copies,
         state::insert_mode() == RL_IM_OVERWRITE,
     );
+    crate::vi::note_self_insert(pending, copies);
     0
 }
 
 pub(crate) fn tab_insert(count: c_int, _key: c_int) -> c_int {
     insert_repeated(b'\t', count, false);
+    crate::vi::note_self_insert(b'\t' as c_int, count);
     0
 }
 
@@ -685,6 +721,10 @@ pub(crate) fn backward_delete_char(count: c_int, key: c_int) -> c_int {
     if count < 0 {
         return delete_char(-count, key);
     }
+    // RUBOUT in the vi replace keymap is `rl_vi_overstrike_delete`.
+    if crate::keymap::vi_replace_keymap_active() {
+        return crate::vi::overstrike_delete(count, key);
+    }
     if state::point() == 0 {
         ring_bell();
         return 1;
@@ -990,7 +1030,7 @@ fn last_command_is(name: &str) -> bool {
     std::ptr::fn_addr_eq(last, expected)
 }
 
-fn abort_without_loop() -> c_int {
+pub(crate) fn abort_without_loop() -> c_int {
     ring_bell();
     state::set_pending_input(0);
     state_clear(RL_STATE_INPUTPENDING);

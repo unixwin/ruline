@@ -279,6 +279,10 @@ pub(crate) fn set_argument_sign(value: c_int) {
     ARGUMENT_SIGN.store(value, Ordering::Relaxed);
 }
 
+pub(crate) fn argument_sign() -> c_int {
+    ARGUMENT_SIGN.load(Ordering::Relaxed)
+}
+
 /// Restore the default numeric argument, as GNU does before reading the next
 /// command.
 pub(crate) fn reset_argument() {

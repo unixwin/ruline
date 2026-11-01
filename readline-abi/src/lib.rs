@@ -24,6 +24,7 @@ mod misc_text;
 mod state;
 mod terminal;
 mod undo;
+mod vi;
 mod yankarg;
 
 pub use callback::*;
@@ -40,4 +41,5 @@ pub use misc_text::*;
 pub use state::*;
 pub use terminal::*;
 pub use undo::*;
+pub use vi::*;
 pub use yankarg::*;

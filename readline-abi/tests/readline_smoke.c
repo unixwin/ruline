@@ -1450,10 +1450,11 @@ static int test_history_abi(void) {
         tmp = "/tmp";
     }
 
-    /* Before the legacy test has allocated anything, GNU returns NULL. */
+    /* Earlier probes may have added history; clear it before asserting the
+     * empty-list contract. */
+    clear_history();
     CHECK(history_list() == NULL);
 
-    clear_history();
     add_history("one");
     add_history("two");
     add_history("three");
@@ -2003,6 +2004,256 @@ static int test_undo_macro_and_remaining_text(void) {
     return 0;
 }
 
+static void set_pending_key(int key) {
+    rl_pending_input = key;
+}
+
+static int test_vi_commands(void) {
+    int ignored = 0;
+
+    rl_initialize();
+    CHECK(rl_vi_editing_mode(1, 0) == 0);
+    CHECK(strcmp(rl_get_keymap_name(rl_get_keymap()), "vi-insert") == 0);
+    CHECK(rl_vi_check() == 0);
+    rl_vi_start_inserting('i', 1, 1);
+    CHECK(strcmp(rl_get_keymap_name(rl_get_keymap()), "vi-insert") == 0);
+    CHECK(rl_vi_insertion_mode(1, 'i') == 0);
+    CHECK(rl_vi_insert_mode(1, 'i') == 0);
+    CHECK(rl_vi_movement_mode(1, 0) == 0);
+    CHECK(strcmp(rl_get_keymap_name(rl_get_keymap()), "vi") == 0);
+
+    /* Word motion. */
+    rl_replace_line("one two three", 0);
+    rl_point = 0;
+    CHECK(rl_vi_fword(1, 'w') == 0);
+    CHECK(rl_point == 4);
+    CHECK(rl_vi_bword(1, 'b') == 0);
+    CHECK(rl_point == 0);
+    CHECK(rl_vi_eword(1, 'e') == 0);
+    CHECK(rl_point == 2);
+    CHECK(rl_vi_next_word(1, 'w') == 0);
+    CHECK(rl_point == 4);
+    CHECK(rl_vi_end_word(1, 'e') == 0);
+    CHECK(rl_point == 6);
+    CHECK(rl_vi_prev_word(1, 'b') == 0);
+    CHECK(rl_point == 4);
+    rl_replace_line("a.b c", 0);
+    rl_point = 0;
+    CHECK(rl_vi_fWord(1, 'W') == 0);
+    CHECK(rl_point == 4);
+    CHECK(rl_vi_bWord(1, 'B') == 0);
+    CHECK(rl_point == 0);
+    CHECK(rl_vi_eWord(1, 'E') == 0);
+    CHECK(rl_point == 2);
+
+    rl_replace_line("   abc", 0);
+    rl_point = 0;
+    CHECK(rl_vi_first_print(1, '^') == 0);
+    CHECK(rl_point == 3);
+    CHECK(rl_vi_back_to_indent(1, '^') == 0);
+    CHECK(rl_point == 3);
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    CHECK(rl_vi_column(3, '|') == 0);
+    CHECK(rl_point == 2);
+
+    /* Operators and undo. */
+    rl_replace_line("one two three", 0);
+    rl_point = 0;
+    rl_mark = 0;
+    set_pending_key('w');
+    CHECK(rl_vi_delete_to(1, 'd') == 0);
+    CHECK(strcmp(rl_line_buffer, "two three") == 0);
+    CHECK(rl_vi_undo(1, 'u') == 0);
+    CHECK(strcmp(rl_line_buffer, "one two three") == 0);
+
+    rl_replace_line("abcdef", 0);
+    rl_point = 2;
+    CHECK(rl_vi_delete(1, 'x') == 0);
+    CHECK(strcmp(rl_line_buffer, "abdef") == 0);
+    CHECK(rl_vi_undo(1, 'u') == 0);
+    CHECK(strcmp(rl_line_buffer, "abcdef") == 0);
+    CHECK(rl_point == 3);
+
+    rl_replace_line("abcdef", 0);
+    rl_point = 0;
+    CHECK(rl_vi_redo(1, '.') == 0);
+    CHECK(strcmp(rl_line_buffer, "bcdef") == 0);
+
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    set_pending_key('w');
+    CHECK(rl_vi_change_to(1, 'c') == 0);
+    CHECK(strcmp(rl_line_buffer, " two") == 0);
+    CHECK(rl_insert(1, 'O') == 0);
+    CHECK(rl_insert(1, 'N') == 0);
+    CHECK(rl_insert(1, 'E') == 0);
+    CHECK(rl_vi_movement_mode(1, 0) == 0);
+    CHECK(strcmp(rl_line_buffer, "ONE two") == 0);
+    CHECK(rl_vi_undo(1, 'u') == 0);
+    CHECK(strcmp(rl_line_buffer, "one two") == 0);
+
+    rl_replace_line("abc", 0);
+    rl_point = 2;
+    CHECK(rl_vi_rubout(1, 8) == 0);
+    CHECK(strcmp(rl_line_buffer, "ac") == 0);
+    rl_replace_line("foo bar", 0);
+    rl_point = 7;
+    CHECK(rl_vi_unix_word_rubout(1, 23) == 0);
+    CHECK(strcmp(rl_line_buffer, "foo ") == 0);
+
+    /* Put / yank / kill ring. */
+    rl_vi_movement_mode(1, 0);
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    rl_kill_text(1, 2);
+    rl_vi_movement_mode(1, 0);
+    rl_replace_line("zz", 0);
+    rl_point = 1;
+    rl_kill_text(1, 2);
+    rl_vi_movement_mode(1, 0);
+    rl_replace_line("q", 0);
+    rl_point = 1;
+    CHECK(rl_vi_put(1, 'p') == 0);
+    CHECK(strcmp(rl_line_buffer, "qz") == 0);
+    CHECK(rl_vi_yank_pop(1, 'p') == 0);
+    CHECK(strcmp(rl_line_buffer, "qb") == 0);
+
+    rl_replace_line("abcdef", 0);
+    rl_point = 0;
+    set_pending_key('e');
+    CHECK(rl_vi_yank_to(1, 'y') == 0);
+    CHECK(strcmp(rl_line_buffer, "abcdef") == 0);
+
+    /* Character search and marks. */
+    rl_replace_line("a,b,c", 0);
+    rl_point = 0;
+    set_pending_key(',');
+    CHECK(rl_vi_char_search(1, 'f') == 0);
+    CHECK(rl_point == 1);
+    CHECK(rl_vi_char_search(1, ';') == 0);
+    CHECK(rl_point == 3);
+    CHECK(rl_vi_char_search(1, ',') == 0);
+    CHECK(rl_point == 1);
+    set_pending_key('a');
+    CHECK(rl_vi_set_mark(1, 'm') == 0);
+    rl_point = 3;
+    set_pending_key('a');
+    CHECK(rl_vi_goto_mark(1, '`') == 0);
+    CHECK(rl_point == 1);
+
+    rl_replace_line("(abc)", 0);
+    rl_point = 0;
+    CHECK(rl_vi_bracktype('(') == 1);
+    CHECK(rl_vi_bracktype(']') == -2);
+    CHECK(rl_vi_match(1, '%') == 0);
+    CHECK(rl_point == 4);
+
+    /* Character and case edits. */
+    rl_replace_line("abcdef", 0);
+    rl_point = 1;
+    set_pending_key('X');
+    CHECK(rl_vi_change_char(2, 'r') == 0);
+    CHECK(strcmp(rl_line_buffer, "aXXdef") == 0);
+    rl_replace_line("aBc def", 0);
+    rl_point = 0;
+    CHECK(rl_vi_change_case(2, '~') == 0);
+    CHECK(strcmp(rl_line_buffer, "Abc def") == 0);
+
+    rl_replace_line("one two", 0);
+    rl_point = 0;
+    CHECK(rl_vi_subst(1, 's') == 0);
+    CHECK(strcmp(rl_line_buffer, "ne two") == 0);
+    rl_vi_movement_mode(1, 0);
+    rl_replace_line("one two", 0);
+    rl_point = 4;
+    CHECK(rl_vi_subst(1, 'S') == 0);
+    CHECK(strcmp(rl_line_buffer, "") == 0);
+    rl_vi_movement_mode(1, 0);
+
+    /* Insert-entry commands. */
+    rl_replace_line("ab", 0);
+    rl_point = 0;
+    CHECK(rl_vi_append_mode(1, 'a') == 0);
+    CHECK(rl_point == 1);
+    rl_vi_movement_mode(1, 0);
+    rl_replace_line("ab", 0);
+    rl_point = 0;
+    CHECK(rl_vi_append_eol(1, 'A') == 0);
+    CHECK(rl_point == 2);
+    rl_vi_movement_mode(1, 0);
+    rl_replace_line("ab", 0);
+    rl_point = 1;
+    CHECK(rl_vi_insert_beg(1, 'I') == 0);
+    CHECK(rl_point == 0);
+    rl_vi_movement_mode(1, 0);
+
+    /* Overstrike and replace mode. */
+    rl_replace_line("abcde", 0);
+    rl_point = 1;
+    CHECK(rl_vi_overstrike(1, 'X') == 0);
+    CHECK(rl_vi_overstrike(1, 'Y') == 0);
+    CHECK(strcmp(rl_line_buffer, "aXYde") == 0);
+    CHECK(rl_vi_overstrike_delete(1, 127) == 0);
+    CHECK(strcmp(rl_line_buffer, "aXcde") == 0);
+    rl_vi_movement_mode(1, 0);
+
+    rl_replace_line("abc", 0);
+    rl_point = 1;
+    CHECK(rl_vi_replace(1, 'R') == 0);
+    CHECK(rl_insert_mode == 1);
+    CHECK(rl_get_keymap_name(rl_get_keymap()) == NULL);
+    CHECK(rl_insert(1, 'X') == 0);
+    CHECK(strcmp(rl_line_buffer, "aXc") == 0);
+    rl_vi_movement_mode(1, 0);
+
+    /* History commands. */
+    clear_history();
+    add_history("cmd one two");
+    add_history("echo alpha beta");
+    using_history();
+    rl_replace_line("", 0);
+    rl_explicit_arg = 1;
+    rl_numeric_arg = 1;
+    CHECK(rl_vi_fetch_history(1, 'G') == 0);
+    CHECK(strcmp(rl_line_buffer, "cmd one two") == 0);
+    CHECK(rl_point == 0);
+    CHECK(rl_mark == rl_end);
+    rl_explicit_arg = 0;
+    rl_numeric_arg = 1;
+    /* fetch-history moved the history position to the old entry; reset to
+     * the newest before testing the last-argument yank. */
+    using_history();
+
+    rl_replace_line("x", 0);
+    rl_point = 0;
+    CHECK(rl_vi_yank_arg(1, ':') == 0);
+    CHECK(strcmp(rl_line_buffer, "x beta") == 0);
+    rl_vi_movement_mode(1, 0);
+
+    rl_pending_input = 0;
+    CHECK(rl_vi_search(1, '/') == 0);
+    CHECK(rl_vi_search_again(1, 'n') == 1);
+    CHECK(rl_vi_domove(0, &ignored) == -1);
+    CHECK(ignored == -1);
+
+    /* Numeric argument and EOF. */
+    rl_vi_arg_digit(1, '3');
+    CHECK(rl_numeric_arg == 3);
+    rl_discard_argument();
+    CHECK(rl_vi_tilde_expand(1, '&') == 0);
+    rl_vi_movement_mode(1, 0);
+    rl_done = 0;
+    CHECK(rl_vi_eof_maybe(1, 4) == 0);
+    CHECK(rl_done == 1);
+    rl_done = 0;
+    /* Leave the global keymap in the emacs default for the probes that
+     * follow (callback/terminal assume the standard map). */
+    rl_emacs_editing_mode(1, 0);
+
+    return 0;
+}
+
 int main(void) {
     if (test_state_and_text() != 0) {
         return 1;
@@ -2014,6 +2265,9 @@ int main(void) {
         return 1;
     }
     if (test_editing_commands() != 0) {
+        return 1;
+    }
+    if (test_vi_commands() != 0) {
         return 1;
     }
     if (test_completion() != 0) {
