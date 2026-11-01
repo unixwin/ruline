@@ -17,41 +17,41 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 | Surface | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: |
-| Functions | 105 | 329 | 31.9% | 224 |
-| Globals | 80 | 110 | 72.7% | 30 |
-| **All** | **185** | **439** | **42.1%** | **254** |
+| Functions | 119 | 329 | 36.2% | 210 |
+| Globals | 82 | 110 | 74.5% | 28 |
+| **All** | **201** | **439** | **45.8%** | **238** |
 
 ## By area
 
 | Area | Functions | Globals | Implemented | Total | Coverage | Missing |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| state | 3/6 | 13/25 | 16 | 31 | 51.6% | 15 |
+| state | 3/6 | 15/25 | 18 | 31 | 58.1% | 13 |
 | text | 7/140 | 0/0 | 7 | 140 | 5.0% | 133 |
 | keymap | 51/53 | 8/12 | 59 | 65 | 90.8% | 6 |
 | completion | 11/18 | 33/36 | 44 | 54 | 81.5% | 10 |
 | hooks | 0/0 | 8/11 | 8 | 11 | 72.7% | 3 |
 | history | 20/56 | 18/19 | 38 | 75 | 50.7% | 37 |
-| callbacks | 0/4 | 0/0 | 0 | 4 | 0.0% | 4 |
-| terminal | 2/22 | 0/0 | 2 | 22 | 9.1% | 20 |
+| callbacks | 4/4 | 0/0 | 4 | 4 | 100.0% | 0 |
+| terminal | 8/22 | 0/0 | 8 | 22 | 36.4% | 14 |
 | display | 10/23 | 0/3 | 10 | 26 | 38.5% | 16 |
-| misc | 1/7 | 0/4 | 1 | 11 | 9.1% | 10 |
+| misc | 5/7 | 0/4 | 5 | 11 | 45.5% | 6 |
 
 ## Top missing groups
 
 1. **text** — 133 missing (7/140 implemented)
 2. **history** — 37 missing (38/75 implemented)
-3. **terminal** — 20 missing (2/22 implemented)
-4. **display** — 16 missing (10/26 implemented)
-5. **state** — 15 missing (16/31 implemented)
+3. **display** — 16 missing (10/26 implemented)
+4. **terminal** — 14 missing (8/22 implemented)
+5. **state** — 13 missing (18/31 implemented)
 
 ## Missing symbols
 
-### state (15)
+### state (13)
 
 `rl_discard_argument` `rl_dispatching` `rl_editing_mode` `rl_eof_found`
-`rl_executing_macro` `rl_explicit_arg` `rl_gnu_readline_p` `rl_instream`
-`rl_numeric_arg` `rl_outstream` `rl_prefer_env_winsize` `rl_restore_state`
-`rl_save_state` `rl_terminal_name` `rl_undo_list`
+`rl_executing_macro` `rl_gnu_readline_p` `rl_instream` `rl_outstream`
+`rl_prefer_env_winsize` `rl_restore_state` `rl_save_state` `rl_terminal_name`
+`rl_undo_list`
 
 ### text (133)
 
@@ -118,17 +118,12 @@ readline-abi/scripts/abi-coverage.py --snapshot
 `rl_operate_and_get_next` `rl_reverse_search_history` `rl_vi_fetch_history` `rl_vi_search`
 `rl_vi_search_again`
 
-### callbacks (4)
+### terminal (14)
 
-`rl_callback_handler_install` `rl_callback_handler_remove` `rl_callback_read_char` `rl_callback_sigcleanup`
-
-### terminal (20)
-
-`rl_clear_pending_input` `rl_deprep_terminal` `rl_echo_signal_char` `rl_execute_next`
-`rl_get_screen_size` `rl_get_termcap` `rl_getc` `rl_prep_terminal`
-`rl_read_key` `rl_reparse_colors` `rl_reset_screen_size` `rl_reset_terminal`
-`rl_set_paren_blink_timeout` `rl_set_screen_size` `rl_set_timeout` `rl_stuff_char`
-`rl_timeout_remaining` `rl_tty_set_default_bindings` `rl_tty_set_echoing` `rl_tty_unset_default_bindings`
+`rl_echo_signal_char` `rl_execute_next` `rl_get_termcap` `rl_getc`
+`rl_read_key` `rl_reparse_colors` `rl_reset_terminal` `rl_set_paren_blink_timeout`
+`rl_set_timeout` `rl_stuff_char` `rl_timeout_remaining` `rl_tty_set_default_bindings`
+`rl_tty_set_echoing` `rl_tty_unset_default_bindings`
 
 ### display (16)
 
@@ -137,11 +132,10 @@ readline-abi/scripts/abi-coverage.py --snapshot
 `rl_next_screen_line` `rl_num_chars_to_read` `rl_on_new_line_with_prompt` `rl_previous_screen_line`
 `rl_redraw_prompt_last_line` `rl_refresh_line` `rl_show_char` `rl_skip_csi_sequence`
 
-### misc (10)
+### misc (6)
 
 `rl_catch_signals` `rl_catch_sigwinch` `rl_change_environment` `rl_check_signals`
-`rl_cleanup_after_signal` `rl_clear_signals` `rl_pending_signal` `rl_persistent_signal_handlers`
-`rl_reset_after_signal` `rl_set_signals`
+`rl_pending_signal` `rl_persistent_signal_handlers`
 
 ## Project extensions not in the GNU headers
 
@@ -149,6 +143,6 @@ readline-abi/scripts/abi-coverage.py --snapshot
 
 ## Audit notes
 
-- Library: `target/release/libreadline.so` (186 ABI exports).
-- Headers: 186 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
+- Library: `target/debug/libreadline.so` (202 ABI exports).
+- Headers: 202 declarations; exported-but-undeclared: 0; declared-but-not-exported: 0.
 - The ten legacy compatibility aliases wrapped in `#if 0` in the GNU header are included in the denominator: GNU's `compat.c` still exports them in `libreadline.so.8`.
