@@ -384,6 +384,10 @@ fn exported_kill_copy_and_yank_share_the_ring() {
     let _guard = lock();
     // SAFETY: the test lock serialises access to the global ABI state.
     unsafe { readline::rl_initialize() };
+    // rl_initialize does not end a kill sequence (GNU neither), so a kill
+    // left by whichever test ran before would make the first kill below
+    // append to its ring entry; end it the way a non-kill command does.
+    assert_eq!(unsafe { readline::rl_beg_of_line(1, 0) }, 0);
 
     set_line("one two");
     set_point(0);
