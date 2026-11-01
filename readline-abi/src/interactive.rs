@@ -7,6 +7,7 @@ use std::ptr;
 
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch, Reedline, Signal};
 
+use crate::completion;
 use crate::line;
 use crate::state;
 
@@ -80,6 +81,10 @@ pub unsafe extern "C" fn readline(prompt: *const c_char) -> *mut c_char {
     line::set_prompt(prompt);
     line::rl_initialize();
 
+    // GNU calls the startup hook before the first prompt and the pre-input
+    // hook once the prompt is on screen.  Both run before any input is read.
+    completion::run_startup_hook();
+
     if state::pending_input() == libc::EOF {
         state::set_pending_input(0);
         mark_eof();
@@ -90,6 +95,8 @@ pub unsafe extern "C" fn readline(prompt: *const c_char) -> *mut c_char {
     let prompt = AbiPrompt {
         text: prompt_text(),
     };
+
+    completion::run_pre_input_hook();
 
     match editor.read_line(&prompt) {
         Ok(Signal::Success(buffer)) => {

@@ -9,11 +9,13 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::missing_safety_doc)]
 
+mod completion;
 mod history;
 mod interactive;
 mod line;
 mod state;
 
+pub use completion::*;
 pub use history::*;
 pub use interactive::*;
 pub use line::*;
