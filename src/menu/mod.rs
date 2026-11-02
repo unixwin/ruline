@@ -600,8 +600,20 @@ impl Menu for ReedlineMenu {
         completer: &mut dyn Completer,
     ) -> bool {
         match self {
-            Self::EngineCompleter(menu) | Self::HistoryMenu(menu) => {
+            Self::EngineCompleter(menu) => {
                 menu.can_partially_complete(values_updated, editor, completer)
+            }
+            Self::HistoryMenu(menu) => {
+                // The `Menu` trait signature carries no `&dyn History`, so the
+                // real history is unreachable here; the inherent
+                // `ReedlineMenu::can_partially_complete` the engine calls is
+                // the correct path. Routing to the passed-in completer (this
+                // arm's old behavior) would silently serve engine completions
+                // as history, so fall back to a `HistoryCompleter` over an
+                // empty in-memory history instead: correct semantics, no data.
+                let empty = crate::FileBackedHistory::default();
+                let mut history_completer = HistoryCompleter::new(&empty);
+                menu.can_partially_complete(values_updated, editor, &mut history_completer)
             }
             Self::WithCompleter {
                 menu,
@@ -612,8 +624,14 @@ impl Menu for ReedlineMenu {
 
     fn update_values(&mut self, editor: &mut Editor, completer: &mut dyn Completer) {
         match self {
-            Self::EngineCompleter(menu) | Self::HistoryMenu(menu) => {
-                menu.update_values(editor, completer);
+            Self::EngineCompleter(menu) => menu.update_values(editor, completer),
+            Self::HistoryMenu(menu) => {
+                // See `can_partially_complete` above: the trait path has no
+                // `&dyn History`, so answer with an empty-history
+                // `HistoryCompleter` rather than the wrong completer kind.
+                let empty = crate::FileBackedHistory::default();
+                let mut history_completer = HistoryCompleter::new(&empty);
+                menu.update_values(editor, &mut history_completer);
             }
             Self::WithCompleter {
                 menu,
@@ -635,8 +653,16 @@ impl Menu for ReedlineMenu {
         painter: &Painter,
     ) {
         match self {
-            Self::EngineCompleter(menu) | Self::HistoryMenu(menu) => {
+            Self::EngineCompleter(menu) => {
                 menu.update_working_details(editor, completer, painter);
+            }
+            Self::HistoryMenu(menu) => {
+                // See `can_partially_complete` above: the trait path has no
+                // `&dyn History`, so answer with an empty-history
+                // `HistoryCompleter` rather than the wrong completer kind.
+                let empty = crate::FileBackedHistory::default();
+                let mut history_completer = HistoryCompleter::new(&empty);
+                menu.update_working_details(editor, &mut history_completer, painter);
             }
             Self::WithCompleter {
                 menu,

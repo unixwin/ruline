@@ -204,10 +204,12 @@ pub fn default_emacs_keybindings() -> Keybindings {
     // Edits
     kb.add_binding(KM::ALT, KC::Delete, edit_bind(EC::DeleteWord));
     kb.add_binding(KM::ALT, KC::Backspace, edit_bind(EC::BackspaceWord));
+    // GNU binds M-m to `back-to-indent` (emacs_keymap.c:427
+    // rl_beg_of_line non-blank) — not a word rubout.
     kb.add_binding(
         KM::ALT,
         KC::Char('m'),
-        ReedlineEvent::Edit(vec![EditCommand::BackspaceWord]),
+        ReedlineEvent::Edit(vec![EditCommand::MoveToLineNonBlankStart { select: false }]),
     );
     // Case changes and transposition: GNU's emacs_meta_keymap binds
     // M-u/M-l/M-c to upcase/downcase/capitalize-word and M-t to
@@ -387,6 +389,11 @@ impl Emacs {
                 ReedlineEvent::EndKbdMacro
             }
             (KeyModifiers::NONE, KeyCode::Char('e')) => ReedlineEvent::CallLastKbdMacro,
+            // `C-x C-e` — GNU `edit-and-execute-command`
+            // (emacs_keymap.c:619, `rl_vi_editing_mode`-adjacent editor
+            // launch). Without this arm OpenEditor is unreachable from
+            // the default emacs table.
+            (KeyModifiers::CONTROL, KeyCode::Char('e')) => ReedlineEvent::OpenEditor,
             (KeyModifiers::CONTROL, KeyCode::Char('u')) => edit_bind(EditCommand::Undo),
             // `C-x C-g` — GNU `abort` (the ctlx keymap's own C-g slot).
             (KeyModifiers::CONTROL, KeyCode::Char('g')) => ReedlineEvent::Esc,
