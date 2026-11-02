@@ -1488,6 +1488,9 @@ mod test {
     #[case("this", 4, "this", 4)]
     #[case("hELLO world", 0, "Hello world", 5)]
     #[case("ALREADY", 0, "Already", 7)]
+    // Multibyte characters: point and the landing spot are byte offsets.
+    #[case("ärger", 0, "Ärger", 6)]
+    #[case("ärger", 2, "äRger", 6)]
     fn capitalize_word_works(
         #[case] input: &str,
         #[case] in_location: usize,

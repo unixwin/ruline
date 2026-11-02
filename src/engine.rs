@@ -3182,13 +3182,18 @@ impl Reedline {
                 Ok(EventStatus::Handled)
             }
             ReedlineEvent::FirstHistoryEntry => {
-                self.history_cursor.back_to_oldest(self.history.as_ref())?;
-                Ok(EventStatus::Handled)
+                if self.history_cursor.jump_to_oldest(self.history.as_ref())? {
+                    Ok(EventStatus::Handled)
+                } else {
+                    Ok(EventStatus::Inapplicable)
+                }
             }
             ReedlineEvent::LastHistoryEntry => {
-                self.history_cursor
-                    .forward_to_newest(self.history.as_ref())?;
-                Ok(EventStatus::Handled)
+                if self.history_cursor.past_newest() {
+                    Ok(EventStatus::Handled)
+                } else {
+                    Ok(EventStatus::Inapplicable)
+                }
             }
             ReedlineEvent::Esc => {
                 self.input_mode = InputMode::Regular;
@@ -3904,14 +3909,8 @@ impl Reedline {
                 self.next_history()?;
                 Ok(EventStatus::Handled)
             }
-            ReedlineEvent::FirstHistoryEntry => {
-                self.first_history()?;
-                Ok(EventStatus::Handled)
-            }
-            ReedlineEvent::LastHistoryEntry => {
-                self.last_history()?;
-                Ok(EventStatus::Handled)
-            }
+            ReedlineEvent::FirstHistoryEntry => self.first_history(),
+            ReedlineEvent::LastHistoryEntry => Ok(self.last_history()),
             ReedlineEvent::Up => self.up_command(),
             ReedlineEvent::Down => self.down_command(),
             ReedlineEvent::Left | ReedlineEvent::Right => {
@@ -4138,46 +4137,52 @@ impl Reedline {
         Ok(())
     }
 
-    /// Jump to the oldest history entry (GNU `beginning-of-history`).
-    fn first_history(&mut self) -> io::Result<()> {
-        self.start_history_traversal();
-        self.history_cursor.back_to_oldest(self.history.as_ref())?;
+    /// Jump to the oldest history entry — GNU `beginning-of-history`
+    /// (`rl_beginning_of_history`, misc.c), which walks `previous-history`
+    /// back to the start and dings when there is no entry to show. So it
+    /// is inapplicable from the oldest entry and when nothing matches the
+    /// navigation query, and composes in `UntilFound`.
+    fn first_history(&mut self) -> io::Result<EventStatus> {
+        if self.input_mode != InputMode::HistoryTraversal {
+            self.history_cursor = HistoryCursor::new(
+                self.get_history_navigation_based_on_line_buffer(),
+                self.get_history_session_id(),
+            );
+        }
+        if !self.history_cursor.jump_to_oldest(self.history.as_ref())? {
+            return Ok(EventStatus::Inapplicable);
+        }
+
+        self.input_mode = InputMode::HistoryTraversal;
+        // The jump lands on a stored entry, never on the recalled last run.
+        self.history_last_run.set_recalled(false);
         self.update_buffer_from_history();
         self.editor.move_to_start(false);
         self.editor.move_to_line_end(false);
         self.editor.commit_cursor();
         self.editor
             .update_undo_state(UndoBehavior::HistoryNavigation);
-        Ok(())
+        Ok(EventStatus::Handled)
     }
 
-    /// Jump to the newest history entry (GNU `end-of-history`).
-    fn last_history(&mut self) -> io::Result<()> {
-        self.start_history_traversal();
-        self.history_cursor
-            .forward_to_newest(self.history.as_ref())?;
-        if self.history_cursor.string_at_cursor().is_none() && !self.history_last_run.is_recalled()
-        {
-            self.input_mode = InputMode::Regular;
+    /// Leave the history for the line that was being typed — GNU
+    /// `end-of-history` (`rl_end_of_history` → `rl_maybe_unsave_line`,
+    /// misc.c), which dings when no history navigation saved a line. So it
+    /// is inapplicable outside history traversal.
+    fn last_history(&mut self) -> EventStatus {
+        if self.input_mode != InputMode::HistoryTraversal {
+            return EventStatus::Inapplicable;
         }
+
+        self.history_cursor.past_newest();
+        self.history_last_run.set_recalled(false);
+        self.input_mode = InputMode::Regular;
         self.update_buffer_from_history();
         self.editor.move_to_end(false);
         self.editor.commit_cursor();
         self.editor
             .update_undo_state(UndoBehavior::HistoryNavigation);
-        Ok(())
-    }
-
-    /// Enter history traversal with a cursor for the current line-buffer
-    /// prefix (the setup `previous_history`/`next_history` share).
-    fn start_history_traversal(&mut self) {
-        if self.input_mode != InputMode::HistoryTraversal {
-            self.input_mode = InputMode::HistoryTraversal;
-            self.history_cursor = HistoryCursor::new(
-                self.get_history_navigation_based_on_line_buffer(),
-                self.get_history_session_id(),
-            );
-        }
+        EventStatus::Handled
     }
 
     fn next_history(&mut self) -> io::Result<()> {
@@ -11353,6 +11358,112 @@ mod tests {
                 assert_eq!(reedline.current_buffer_contents(), buffer);
             }
         }
+    }
+
+    fn history_jump_engine() -> Reedline {
+        let mut reedline = Reedline::create();
+        for entry in ["echo hi", "git status", "ls", "git log"] {
+            reedline
+                .history
+                .save(HistoryItem::from_command_line(entry))
+                .unwrap();
+        }
+        reedline
+    }
+
+    #[test]
+    fn first_history_jumps_to_the_oldest_entry() {
+        let mut reedline = history_jump_engine();
+
+        assert!(matches!(
+            send(&mut reedline, ReedlineEvent::FirstHistoryEntry),
+            EventStatus::Handled
+        ));
+        assert_eq!(reedline.current_buffer_contents(), "echo hi");
+        assert!(matches!(
+            send(&mut reedline, ReedlineEvent::FirstHistoryEntry),
+            EventStatus::Inapplicable
+        ));
+        assert_eq!(reedline.current_buffer_contents(), "echo hi");
+
+        send(&mut reedline, ReedlineEvent::NextHistory);
+        assert_eq!(reedline.current_buffer_contents(), "git status");
+    }
+
+    #[test]
+    fn first_history_honors_the_typed_prefix_and_last_history_restores_it() {
+        let mut reedline = history_jump_engine();
+        reedline.run_edit_commands(&[EditCommand::InsertString("git".into())]);
+
+        send(&mut reedline, ReedlineEvent::FirstHistoryEntry);
+        assert_eq!(reedline.current_buffer_contents(), "git status");
+
+        assert!(matches!(
+            send(&mut reedline, ReedlineEvent::LastHistoryEntry),
+            EventStatus::Handled
+        ));
+        assert_eq!(reedline.current_buffer_contents(), "git");
+        assert!(matches!(
+            send(&mut reedline, ReedlineEvent::LastHistoryEntry),
+            EventStatus::Inapplicable
+        ));
+    }
+
+    #[test]
+    fn last_history_restores_the_draft_after_walking_back() {
+        let mut reedline = history_jump_engine();
+        reedline.run_edit_commands(&[
+            EditCommand::InsertString("draft".into()),
+            EditCommand::MoveToStart { select: false },
+        ]);
+
+        send(&mut reedline, ReedlineEvent::PreviousHistory);
+        send(&mut reedline, ReedlineEvent::PreviousHistory);
+        assert_eq!(reedline.current_buffer_contents(), "ls");
+
+        send(&mut reedline, ReedlineEvent::LastHistoryEntry);
+        assert_eq!(reedline.current_buffer_contents(), "draft");
+    }
+
+    #[test]
+    fn first_history_without_a_match_leaves_the_line_alone() {
+        let mut reedline = history_jump_engine();
+        reedline.run_edit_commands(&[EditCommand::InsertString("zzz".into())]);
+
+        assert!(matches!(
+            send(&mut reedline, ReedlineEvent::FirstHistoryEntry),
+            EventStatus::Inapplicable
+        ));
+        assert_eq!(reedline.current_buffer_contents(), "zzz");
+        assert!(matches!(
+            send(&mut reedline, ReedlineEvent::LastHistoryEntry),
+            EventStatus::Inapplicable
+        ));
+    }
+
+    // GNU `beginning-of-history` shows the oldest stored entry even while Up
+    // is recalling the excluded last run.
+    #[test]
+    fn first_history_leaves_the_recalled_last_run_for_the_oldest_entry() {
+        let mut rl = seam_engine(Box::new(crate::Emacs::default()))
+            .with_history_exclusion_prefix(Some(" ".into()));
+        rl.history
+            .save(HistoryItem::from_command_line("echo hi"))
+            .unwrap();
+        drive_until_signal(&mut rl, &[ch(' '), ch('l'), ch('s'), key(KeyCode::Enter)]);
+
+        drive(&mut rl, &[key(KeyCode::Up)]);
+        assert_eq!(
+            rl.editor.get_buffer(),
+            " ls",
+            "Up recalls the excluded line"
+        );
+
+        assert!(matches!(
+            send(&mut rl, ReedlineEvent::FirstHistoryEntry),
+            EventStatus::Handled
+        ));
+        assert_eq!(rl.editor.get_buffer(), "echo hi");
     }
 
     #[test]
