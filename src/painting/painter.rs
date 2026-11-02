@@ -497,6 +497,11 @@ pub struct Painter {
     /// clear the input region and redraw only the last prompt line and the
     /// buffer, never re-emitting the prompt's leading lines.
     resize_redisplay: bool,
+    /// The frame that answers a resize must be followed by one size re-read:
+    /// under Windows Terminal's `PSEUDOCONSOLE_RESIZE_QUIRK` ConPTY the
+    /// resize is only applied when conhost processes output, so the frame's
+    /// own flush is what makes the true size queryable.
+    recheck_size_after_frame: bool,
     /// Rows below the prompt's start row that the last paint left the cursor
     /// on (`_rl_last_v_pos`'s counterpart). `None` after a large-buffer
     /// paint, whose skipped rows and row-0 anchor the relative resize frame
@@ -527,6 +532,7 @@ impl Painter {
             cursor_hidden: false,
             bottom_confirmed_at: None,
             resize_redisplay: false,
+            recheck_size_after_frame: false,
             last_cursor_row_offset: None,
             last_region_row_offset: 0,
         }
@@ -876,11 +882,10 @@ impl Painter {
     }
 
     /// Main painter for the prompt and buffer
-    /// It queues all the actions required to print the prompt together with
-    /// lines that make the buffer.
-    /// Using the prompt lines object in this function it is estimated how the
-    /// prompt should scroll up and how much space is required to print all the
-    /// lines for the buffer
+    /// It queues all of the actions required to paint the prompt together with
+    /// lines that make the buffer, then — when a resize armed the re-check —
+    /// re-reads the console size *after* the frame has been flushed and
+    /// repaints at the fresh size if it moved (see the re-check below).
     ///
     /// Note. The `ScrollUp` operation in `crossterm` deletes lines from the top of
     /// the screen.
@@ -889,6 +894,58 @@ impl Painter {
         prompt: &dyn Prompt,
         lines: &PromptLines,
         prompt_mode: PromptEditMode,
+        menu: Option<&ReedlineMenu>,
+        use_ansi_coloring: bool,
+        cursor_config: &Option<CursorConfig>,
+    ) -> Result<()> {
+        self.paint_buffer_once(
+            prompt,
+            lines,
+            &prompt_mode,
+            menu,
+            use_ansi_coloring,
+            cursor_config,
+        )?;
+
+        // Windows Terminal creates its ConPTY with
+        // PSEUDOCONSOLE_RESIZE_QUIRK, under which conhost defers applying a
+        // resize until it next processes output: until OUR frame above has
+        // been flushed, every size query — the WinAPI read included —
+        // answers with the OLD console, and the resize event's payload can
+        // predate the application too (niubash#822: the frame painted from
+        // the event laid a completion menu out at the old width in a
+        // freshly maximized window). `rl_resize_terminal` (terminal.c:429-446)
+        // re-reads the tty only *after* the resize has been applied and only
+        // then hands the redraw to `_rl_redisplay_after_sigwinch`; the
+        // analogue of "after it has been applied" under the quirk is "after
+        // our frame's output". Re-read once, and when the console now
+        // disagrees with the size the frame was painted at, paint again.
+        if self.recheck_size_after_frame {
+            self.recheck_size_after_frame = false;
+            let stdout_is_terminal = matches!(self.stdout, W::Terminal(_));
+            if let Some(size) = live_terminal_size(stdout_is_terminal) {
+                if size != self.terminal_size {
+                    self.terminal_size = size;
+                    self.paint_buffer_once(
+                        prompt,
+                        lines,
+                        &prompt_mode,
+                        menu,
+                        use_ansi_coloring,
+                        cursor_config,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Painter::repaint_buffer`]'s single paint: one frame, flushed.
+    fn paint_buffer_once(
+        &mut self,
+        prompt: &dyn Prompt,
+        lines: &PromptLines,
+        prompt_mode: &PromptEditMode,
         menu: Option<&ReedlineMenu>,
         use_ansi_coloring: bool,
         cursor_config: &Option<CursorConfig>,
@@ -1072,7 +1129,7 @@ impl Painter {
 
             let shape = cursor_config
                 .as_ref()
-                .and_then(|shapes| shapes.shape_for(&prompt_mode));
+                .and_then(|shapes| shapes.shape_for(prompt_mode));
             if let Some(shape) = shape {
                 self.stdout.queue(shape)?;
             }
@@ -1685,6 +1742,7 @@ impl Painter {
         self.term_is_dumb = term_is_dumb(term.as_deref());
 
         self.resize_redisplay = true;
+        self.recheck_size_after_frame = true;
     }
 
     /// Re-read the live console size before a paint's layout math runs, the
@@ -1696,10 +1754,12 @@ impl Painter {
     /// it, or a menu keeps laying out at the width of the *previous* frame
     /// (three ~60-column menu columns in a 280-column window).
     ///
-    /// Skipped on the resize frame itself: the event that armed it already
-    /// settled [`Painter::terminal_size`] (under Windows Terminal the resize
-    /// event is only delivered once conhost has applied the new size), and
-    /// the query could only race it back to the old value.
+    /// Skipped on the resize frame itself: the event that armed it carried
+    /// the freshest size available *at event time*, while the query may
+    /// still answer with the pre-resize console (Windows Terminal defers
+    /// the resize until conhost processes output — see
+    /// [`Painter::repaint_buffer`]'s post-flush re-read). The frame's own
+    /// flush is what makes the queryable size catch up.
     pub(crate) fn refresh_size_before_layout(&mut self) {
         if self.resize_redisplay {
             return;
@@ -2628,9 +2688,9 @@ mod tests {
 
     #[test]
     fn layout_refresh_skips_the_query_for_the_resize_frame() {
-        // The resize event already settled the size (under Windows Terminal
-        // the event is delivered once the resize is applied); a query could
-        // only race it back to the old value.
+        // The resize event armed the frame with the freshest size available
+        // at event time; a pre-frame query could only race it back to the
+        // pre-resize console (see the post-flush re-read below).
         super::stub_size_query(Some((40, 10)));
         let mut p = Painter::new(W::capture());
         p.terminal_size = (60, 10);
@@ -2638,6 +2698,112 @@ mod tests {
         p.refresh_size_before_layout();
         super::clear_size_query_stub();
         assert_eq!(p.screen_width(), 60);
+    }
+
+    // niubash#822, the Windows Terminal `PSEUDOCONSOLE_RESIZE_QUIRK` half:
+    // the deferred resize is applied when conhost processes output — the
+    // resize frame's own flush — so only a size read taken AFTER the frame
+    // can see the new console. When that post-flush read disagrees with
+    // what the frame was painted at, the paint runs again at the fresh
+    // size (`rl_resize_terminal`'s re-read-then-redisplay,
+    // terminal.c:429-446).
+    #[test]
+    fn resize_frame_repaints_at_the_post_flush_size_when_the_console_moved() {
+        let mut p = Painter::new(W::capture());
+        p.terminal_size = (40, 10);
+        p.term_is_dumb = false;
+        p.prompt_start_row = PromptStartRow::Verified(4);
+        let lines = make_lines("leading\n", "> ", "", "one", "");
+        // Establish the on-screen geometry at 40 columns (no stub: no
+        // console answers, the cached size stands).
+        p.handle_resize(40, 10);
+        p.repaint_buffer(
+            &TestPrompt,
+            &lines,
+            PromptEditMode::Default,
+            None,
+            false,
+            &None,
+        )
+        .expect("first repaint failed");
+        let established_len = p.stdout.captured().len();
+
+        // From here every live query answers 60 columns, as the console does
+        // once the frame's output applied the resize; the event's payload
+        // still said 40.
+        super::stub_size_query(Some((60, 10)));
+        p.handle_resize(40, 10);
+        p.repaint_buffer(
+            &TestPrompt,
+            &lines,
+            PromptEditMode::Default,
+            None,
+            false,
+            &None,
+        )
+        .expect("resize repaint failed");
+        super::clear_size_query_stub();
+        let frame = String::from_utf8_lossy(&p.stdout.captured()[established_len..]);
+        let frame = frame.as_ref();
+
+        assert_eq!(p.screen_width(), 60, "the flushed console's size wins");
+        assert_eq!(
+            frame.matches("leading").count(),
+            1,
+            "the second (ordinary) paint re-emits the full prompt exactly once: {frame:?}"
+        );
+        assert!(
+            frame.contains("\x1b[J"),
+            "the resize frame's relative clear is in the stream"
+        );
+    }
+
+    #[test]
+    fn resize_frame_paints_once_when_the_flushed_console_agrees() {
+        let mut p = Painter::new(W::capture());
+        p.terminal_size = (40, 10);
+        p.term_is_dumb = false;
+        p.prompt_start_row = PromptStartRow::Verified(4);
+        let lines = make_lines("leading\n", "> ", "", "one", "");
+        p.handle_resize(40, 10);
+        p.repaint_buffer(
+            &TestPrompt,
+            &lines,
+            PromptEditMode::Default,
+            None,
+            false,
+            &None,
+        )
+        .expect("first repaint failed");
+        let established_len = p.stdout.captured().len();
+
+        // The post-flush query agrees with the payload: one frame, no
+        // second paint.
+        super::stub_size_query(Some((40, 10)));
+        p.handle_resize(40, 10);
+        p.repaint_buffer(
+            &TestPrompt,
+            &lines,
+            PromptEditMode::Default,
+            None,
+            false,
+            &None,
+        )
+        .expect("resize repaint failed");
+        super::clear_size_query_stub();
+        let frame = String::from_utf8_lossy(&p.stdout.captured()[established_len..]);
+        let frame = frame.as_ref();
+
+        assert_eq!(p.screen_width(), 40);
+        let frames = frame
+            .split("\x1b[?2026l")
+            .filter(|c| c.contains("> "))
+            .count();
+        assert_eq!(frames, 1, "one frame when nothing moved: {frame:?}");
+        assert!(
+            !frame.contains("leading"),
+            "the leading line is never re-emitted"
+        );
     }
 
     // A measured row raises a `terminal::size()` that under-reports, and leaves
