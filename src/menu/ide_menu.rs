@@ -1529,7 +1529,7 @@ mod tests {
         use crate::painting::W;
 
         let mut painter = Painter::new(W::sink());
-        painter.handle_resize(100, 40);
+        painter.apply_resize(100, 40);
         let mut editor = Editor::default();
 
         // Full-width cap, like nushell's `max_completion_width: (term size).columns`.

@@ -1,4 +1,10 @@
 mod painter;
+
+// The test-only resize-query stub lives in the painter; engine tests
+// install it from outside this module (niubash#822 backport: the resize
+// resolution re-queries the tty).
+#[cfg(test)]
+pub(crate) use painter::{clear_resize_query_stub, stub_resize_query};
 mod prompt_lines;
 mod styled_text;
 #[cfg(test)]

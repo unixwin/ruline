@@ -922,7 +922,7 @@ mod tests {
         terminal_size: (u16, u16),
     ) {
         let mut painter = Painter::new(W::sink());
-        painter.handle_resize(terminal_size.0, terminal_size.1);
+        painter.apply_resize(terminal_size.0, terminal_size.1);
 
         menu.menu_event(MenuEvent::Activate(false));
         menu.update_working_details(editor, completer, &painter);
@@ -938,7 +938,7 @@ mod tests {
         let mut menu = ColumnarMenu::default().with_name("testmenu");
         let mut editor = Editor::default();
         let mut painter = Painter::new(W::sink());
-        painter.handle_resize(120, 10);
+        painter.apply_resize(120, 10);
 
         // Initial results have no descriptions -> normal multi-column layout.
         let mut plain = FakeCompleter::new(&["alpha", "beta", "gamma"]);
@@ -1066,7 +1066,7 @@ mod tests {
         assert_eq!(menu.get_rows(), 0, "setup: layout reserves no lines");
 
         let mut painter = Painter::new(W::sink());
-        painter.handle_resize(30, 10);
+        painter.apply_resize(30, 10);
         for event in [
             MenuEvent::NextElement,
             MenuEvent::PreviousElement,
@@ -1122,7 +1122,7 @@ mod tests {
         let (row, col) = menu.position_from_index(menu.index());
         assert_eq!((row, col), (65_549, 0));
         let mut painter = Painter::new(W::sink());
-        painter.handle_resize(20, 10);
+        painter.apply_resize(20, 10);
         menu.recompute_layout(&painter);
         assert!(menu.skip_rows > u16::MAX as usize);
         assert!(menu.menu_string(10, false).contains("ITEM-65549"));

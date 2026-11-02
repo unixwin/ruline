@@ -35,6 +35,71 @@ fn skip_buffer_lines(string: &str, skip: usize, offset: Option<usize>) -> &str {
     string[index..limit].trim_end_matches('\n')
 }
 
+/// The size query a resize settles on, the way GNU readline resolves
+/// one. `_rl_sigwinch_resize_terminal` answers a resize by re-reading
+/// the tty — `_rl_get_screen_size (fileno (rl_instream), 1)`
+/// (terminal.c:423-426), which queries the kernel's winsize first
+/// (terminal.c:301-304) and only walks the environment/termcap/80x24
+/// fallback ladder when the query fails (terminal.c:324-372); the
+/// signal itself carries no size worth trusting.
+///
+/// On Windows the resize notification (`WINDOW_BUFFER_SIZE_EVENT`)
+/// reports the *buffer* extent, not the visible window, and the two
+/// diverge on a console whose buffer cannot follow a shrink
+/// (wrap-text off, long lines pinned in the scrollback): the payload
+/// keeps the stale wide buffer size while the window the user sees is
+/// narrow, and any layout computed from it — prompt wrap, completion
+/// menu columns — overruns the real screen for the rest of the read.
+/// `terminal::size()` reads the visible window (crossterm_winapi
+/// `ScreenBufferInfo::terminal_size`, srWindow-based, csbi.rs:49-53),
+/// the analogue of the ioctl winsize GNU trusts, so the query wins
+/// and the payload survives only as the no-tty fallback — the same
+/// precedence `_rl_get_screen_size` applies.
+///
+/// Tests cannot reach a deterministic answer from a live console, so a
+/// thread-local stub can replace the query for the thread running the
+/// test (an explicit `None` models a failed query).
+fn resize_query() -> Option<(u16, u16)> {
+    #[cfg(test)]
+    {
+        if let Some(stub) = RESIZE_QUERY_STUB.with(|cell| *cell.borrow()) {
+            return stub;
+        }
+    }
+    terminal::size().ok()
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESIZE_QUERY_STUB: std::cell::RefCell<Option<Option<(u16, u16)>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Install the query answer resize handling resolves with on this
+/// thread (`Some(size)` models a console reporting `size`, `None`
+/// models a failed/no-tty query). Test-only.
+#[cfg(test)]
+pub(crate) fn stub_resize_query(size: Option<(u16, u16)>) {
+    RESIZE_QUERY_STUB.with(|cell| *cell.borrow_mut() = Some(size));
+}
+
+/// Drop a [`stub_resize_query`] install, restoring the live query.
+/// Test-only.
+#[cfg(test)]
+pub(crate) fn clear_resize_query_stub() {
+    RESIZE_QUERY_STUB.with(|cell| *cell.borrow_mut() = None);
+}
+
+/// Combine [`resize_query`]'s answer with the resize event's payload:
+/// the query outranks the payload; a failed (or degenerate) query
+/// falls back to it.
+fn resolve_resize_size(payload: (u16, u16), queried: Option<(u16, u16)>) -> (u16, u16) {
+    match queried {
+        Some(size @ (width, _)) if width > 0 => size,
+        _ => payload,
+    }
+}
+
 // `text` of the buffer as it is drawn: the `\r` of a CRLF is the line break's
 // own and draws nothing, every other control char shows escaped.
 fn escape_as_drawn(text: &str) -> std::borrow::Cow<'_, str> {
@@ -1462,6 +1527,13 @@ impl Painter {
 
     /// Updates prompt origin and offset to handle a screen resize event
     pub(crate) fn handle_resize(&mut self, width: u16, height: u16) {
+        let (width, height) = resolve_resize_size((width, height), resize_query());
+        self.apply_resize(width, height);
+    }
+
+    /// [`Painter::handle_resize`] with the size already resolved: the
+    /// query above needs a live tty, so tests drive this seam instead.
+    pub(crate) fn apply_resize(&mut self, width: u16, height: u16) {
         self.terminal_size = (width, height);
         let term = var_os("TERM");
         self.term_is_dumb = term_is_dumb(term.as_deref());
@@ -1798,6 +1870,55 @@ mod tests {
     use std::borrow::Cow;
     use std::sync::{Arc, Mutex};
 
+    /// The resize resolution follows `_rl_get_screen_size` precedence
+    /// (terminal.c:301-372): the tty query outranks everything, the
+    /// event payload is only the fallback for a missing/degenerate
+    /// query. The Windows payload is the buffer extent
+    /// (`WINDOW_BUFFER_SIZE_EVENT`), which a wrap-off console keeps at
+    /// the stale wide size through a shrink while the window query
+    /// already reports the narrower truth — the query must win there.
+    #[test]
+    fn resize_resolution_prefers_the_window_query() {
+        // The wrap-off shrink: payload still the old buffer size, query
+        // already the narrowed window.
+        assert_eq!(
+            resolve_resize_size((240, 40), Some((100, 30))),
+            (100, 30),
+            "the payload keeps the stale buffer extent; the window wins"
+        );
+        // Grow: both agree; the query still wins on principle.
+        assert_eq!(resolve_resize_size((120, 30), Some((120, 30))), (120, 30));
+    }
+
+    #[test]
+    fn resize_resolution_falls_back_to_the_payload() {
+        // No tty to ask (piped test runner, a serial line): the payload
+        // is all there is, exactly as the kernel query failing in
+        // `_rl_get_screen_size` walks down to its fallbacks.
+        assert_eq!(resolve_resize_size((120, 30), None), (120, 30));
+        // A degenerate query is not a size; ignore it for the payload.
+        assert_eq!(resolve_resize_size((120, 30), Some((0, 0))), (120, 30));
+    }
+
+    /// `apply_resize` is `handle_resize` with the size settled, so its
+    /// observable contract is the screen size the rest of the paint
+    /// computes from — the completion menu column count reads it
+    /// through `screen_width()`.
+    #[test]
+    fn apply_resize_updates_the_reported_screen_size() {
+        let mut painter = Painter::new(W::sink());
+        assert_eq!(painter.screen_width(), 0);
+        painter.apply_resize(100, 30);
+        assert_eq!(painter.screen_width(), 100);
+        assert_eq!(painter.screen_height(), 30);
+        // The shrink case from the other direction: a later, smaller
+        // resize must replace the larger one, not clamp to the max —
+        // the menu column count follows the new, narrower width.
+        painter.apply_resize(60, 20);
+        assert_eq!(painter.screen_width(), 60);
+        assert_eq!(painter.screen_height(), 20);
+    }
+
     /// A prompt fragment for the layout tests: any two ASCII columns will do.
     /// It happens to read like [`crate::DEFAULT_PROMPT_INDICATOR`] but is
     /// independent of it, since these tests assert column arithmetic against a
@@ -2051,7 +2172,7 @@ mod tests {
     #[test]
     fn test_state_before_suspension_records_no_cursor_without_terminal() {
         let mut painter = Painter::new(W::sink());
-        painter.handle_resize(80, 8);
+        painter.apply_resize(80, 8);
         assert_eq!(painter.state_before_suspension().cursor, None);
     }
 
@@ -2068,7 +2189,7 @@ mod tests {
         #[case] expected: bool,
     ) {
         let mut painter = Painter::new(W::sink());
-        painter.handle_resize(80, 8); // rows 0..=7
+        painter.apply_resize(80, 8); // rows 0..=7
         painter.prompt_start_row.mark_verified(start_row);
         painter.last_required_lines = required_lines;
 
@@ -2416,7 +2537,7 @@ mod tests {
     #[test]
     fn test_prompt_does_not_climb_after_a_resize_that_under_reports() {
         let mut painter = Painter::new(W::sink_with_cursor_at((0, 35)));
-        painter.handle_resize(80, 10);
+        painter.apply_resize(80, 10);
 
         let anchors: Vec<u16> = (0..4)
             .map(|_| {

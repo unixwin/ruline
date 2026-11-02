@@ -7534,6 +7534,9 @@ mod tests {
                 enter_newline: true,
                 active: true,
             }));
+        // The resize resolution re-queries the tty (GNU terminal.c:423);
+        // pin the query to "no tty" so the event payload is what settles.
+        crate::painting::stub_resize_query(None);
         let prompt = DefaultPrompt::default();
         let result = rl
             .process_input_batch(
@@ -7545,11 +7548,39 @@ mod tests {
                 ],
             )
             .expect("batch ok");
+        crate::painting::clear_resize_query_stub();
         assert!(matches!(result, ControlFlow::Continue(())));
         assert_eq!(rl.editor.get_buffer(), "ab");
         assert_eq!(
             (rl.painter.screen_width(), rl.painter.screen_height()),
             (120, 40)
+        );
+    }
+
+    /// niubash#822: a resize event's payload is the console *buffer*
+    /// extent on Windows (`WINDOW_BUFFER_SIZE_EVENT`), which a wrap-off
+    /// console keeps at the stale wide size through a shrink while the
+    /// window the user sees is already narrow. The resize resolution
+    /// re-queries the tty the way GNU does (terminal.c:423
+    /// `_rl_sigwinch_resize_terminal` -> `_rl_get_screen_size`, kernel
+    /// winsize first), so the painter must settle on the queried
+    /// window, not the payload.
+    #[test]
+    fn resize_event_resolves_against_the_queried_window_not_the_payload() {
+        let mut rl = seam_engine(Box::<crate::Emacs>::default());
+        crate::painting::stub_resize_query(Some((100, 30)));
+        let result = rl
+            .process_input_batch(
+                &DefaultPrompt::default(),
+                vec![Event::Key(ch('a')), Event::Resize(240, 40)],
+            )
+            .expect("batch ok");
+        crate::painting::clear_resize_query_stub();
+        assert!(matches!(result, ControlFlow::Continue(())));
+        assert_eq!(
+            (rl.painter.screen_width(), rl.painter.screen_height()),
+            (100, 30),
+            "the stale wide buffer payload must lose to the window query"
         );
     }
 
@@ -10207,7 +10238,7 @@ mod tests {
 
         // Settling repaints, which needs a painter that believes it is on a terminal.
         // Size first: `handle_resize` invalidates the anchor the next line pins.
-        reedline.painter.handle_resize(80, 24);
+        reedline.painter.apply_resize(80, 24);
         reedline.painter.force_prompt_anchored_for_test(0);
 
         reedline.run_edit_commands(&[EditCommand::InsertString(buffer.to_string())]);

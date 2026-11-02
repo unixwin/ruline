@@ -695,7 +695,7 @@ mod tests {
             completions: ["alpha", "beta", "gamma"].map(String::from).to_vec(),
         };
         let mut painter = Painter::new(W::sink());
-        painter.handle_resize(terminal_size.0, terminal_size.1);
+        painter.apply_resize(terminal_size.0, terminal_size.1);
         menu.menu_event(MenuEvent::Activate(false));
         menu.update_working_details(&mut editor, &mut completer, &painter);
     }
@@ -718,7 +718,7 @@ mod tests {
             completions: vec![],
         };
         let mut painter = Painter::new(W::sink());
-        painter.handle_resize(0, 0);
+        painter.apply_resize(0, 0);
         menu.menu_event(MenuEvent::Activate(false));
         menu.update_working_details(&mut editor, &mut completer, &painter);
     }
