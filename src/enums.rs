@@ -28,7 +28,7 @@ impl From<crossterm::event::MouseButton> for MouseButton {
 
 /// Valid ways how `Reedline::read_line()` can return
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signal {
     /// Entry succeeded with the provided content
     Success(String),
@@ -1733,12 +1733,19 @@ pub enum ReedlineEvent {
 }
 
 /// What an edit mode or event handler did with one event.
+///
+/// The engine reports it for every event it runs, and an
+/// [`EditMode`](crate::EditMode) answers with it from
+/// [`handle_mode_specific_event`](crate::EditMode::handle_mode_specific_event),
+/// so a host can assert on it in tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventStatus {
     /// The event applied; stop the fallback chain.
     Handled,
     /// The event did not apply; a binding may fall through to the next one.
     Inapplicable,
-    /// The event ends the editing session with the carried signal.
+    /// The event ends the editing session, and `read_line` returns the
+    /// carried signal.
     Exits(Signal),
 }
 
