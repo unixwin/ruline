@@ -4611,7 +4611,7 @@ impl Reedline {
                     // loses whole edits — a bracketed paste arrives as
                     // `InsertString`, `Delete` arrives as itself.
                     self.input_mode = InputMode::Regular;
-                    self.run_edit_commands(&[command.clone()]);
+                    self.run_edit_commands(std::slice::from_ref(command));
                 }
             }
         }
