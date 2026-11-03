@@ -5,7 +5,7 @@ use crate::{
         add_common_control_bindings, add_common_edit_bindings, add_common_navigation_bindings,
         add_common_selection_bindings, add_extending_navigation_bindings, edit_bind, Keybindings,
     },
-    Direction, EditCommand, MotionTarget,
+    Direction, EditCommand, MotionTarget, ReedlineEvent,
 };
 
 /// The `M-<`/`M->` buffer-jump bindings helix had while they lived in
@@ -76,8 +76,19 @@ pub fn default_helix_normal_keybindings() -> Keybindings {
         KeyCode::Char('`'),
         edit_bind(EditCommand::UppercaseSelection),
     );
+    helix_suspend_binding(&mut kb);
 
     kb
+}
+
+fn helix_suspend_binding(kb: &mut Keybindings) {
+    // Raw mode has no tty VSUSP delivery, so every mode table needs the
+    // explicit binding — same shape as vi-insert/vi-normal.
+    kb.add_binding(
+        KeyModifiers::CONTROL,
+        KeyCode::Char('z'),
+        ReedlineEvent::Suspend,
+    );
 }
 
 /// Default Helix select-mode keybindings.
@@ -115,6 +126,7 @@ pub fn default_helix_insert_keybindings() -> Keybindings {
     add_common_edit_bindings(&mut kb);
     add_common_selection_bindings(&mut kb);
     add_helix_buffer_jump_bindings(&mut kb);
+    helix_suspend_binding(&mut kb);
 
     kb
 }

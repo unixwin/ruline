@@ -26,6 +26,7 @@ use {
         terminal_extensions::{
             bracketed_paste::BracketedPasteGuard,
             kitty::KittyProtocolGuard,
+            mouse_capture::MouseCaptureGuard,
             semantic_prompt::{Osc133ClickEventsMarkers, SemanticPromptMarkers},
             tty_mode::TtyModeGuard,
         },
@@ -327,6 +328,9 @@ pub struct Reedline {
 
     // Manage optional kitty protocol
     kitty_protocol: KittyProtocolGuard,
+
+    // Manage terminal mouse capture for click-to-cursor
+    mouse_capture: MouseCaptureGuard,
 
     // Whether lines should be accepted immediately
     immediately_accept: bool,
@@ -748,14 +752,22 @@ fn glob_match(pat: &str, text: &str) -> bool {
     fn at(chars: &[char], i: usize) -> Option<char> {
         chars.get(i).copied()
     }
-    fn matches(p: &[char], t: &[char]) -> bool {
+    // Naive backtracking degenerates exponentially on patterns like
+    // `*a*a*a*` against long strings, and the pattern is user input
+    // (vi `/` search over history). A call budget caps the work; an
+    // exhausted budget just fails the match instead of hanging.
+    fn matches(p: &[char], t: &[char], budget: &mut usize) -> bool {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
         if p.is_empty() {
             return t.is_empty();
         }
         match p[0] {
-            '*' => (0..=t.len()).any(|i| matches(&p[1..], &t[i..])),
-            '?' => !t.is_empty() && matches(&p[1..], &t[1..]),
-            '\\' => p.len() > 1 && t.first() == p.get(1) && matches(&p[2..], &t[1..]),
+            '*' => (0..=t.len()).any(|i| matches(&p[1..], &t[i..], budget)),
+            '?' => !t.is_empty() && matches(&p[1..], &t[1..], budget),
+            '\\' => p.len() > 1 && t.first() == p.get(1) && matches(&p[2..], &t[1..], budget),
             '[' => {
                 let Some(&c) = t.first() else { return false };
                 let (negate, mut i) = match at(p, 1) {
@@ -793,18 +805,20 @@ fn glob_match(pat: &str, text: &str) -> bool {
                     }
                 }
                 if matched != negate {
-                    matches(&p[i + 1..], &t[1..])
+                    matches(&p[i + 1..], &t[1..], budget)
                 } else {
                     false
                 }
             }
-            c => t.first() == Some(&c) && matches(&p[1..], &t[1..]),
+            c => t.first() == Some(&c) && matches(&p[1..], &t[1..], budget),
         }
     }
-    matches(
-        &pat.chars().collect::<Vec<_>>(),
-        &text.chars().collect::<Vec<_>>(),
-    )
+    let p = pat.chars().collect::<Vec<_>>();
+    let t = text.chars().collect::<Vec<_>>();
+    // Realistic search patterns finish far below this; it only has to
+    // stop exponential blowups, so it is sized generously.
+    let mut budget = 100_000_usize.max(p.len().saturating_add(1) * t.len().saturating_add(1));
+    matches(&p, &t, &mut budget)
 }
 
 /// `history_tokenize` (histexpand.c:1692 → `history_tokenize_internal`
@@ -1103,6 +1117,7 @@ impl Reedline {
             cursor_shapes: None,
             bracketed_paste: BracketedPasteGuard::default(),
             kitty_protocol: KittyProtocolGuard::default(),
+            mouse_capture: MouseCaptureGuard::default(),
             immediately_accept: false,
             pending_input: VecDeque::new(),
             event_replay_depths: VecDeque::new(),
@@ -1376,6 +1391,7 @@ impl Reedline {
     #[must_use]
     pub fn with_mouse_click(mut self, mode: MouseClickMode) -> Self {
         self.mouse_click_mode = mode;
+        self.mouse_capture.set(mode.is_enabled());
         if matches!(mode, MouseClickMode::EnabledWithOsc133) {
             self.painter
                 .set_semantic_markers(Some(Osc133ClickEventsMarkers::boxed()));
@@ -1778,6 +1794,7 @@ impl Reedline {
         terminal::enable_raw_mode()?;
         self.bracketed_paste.enter();
         self.kitty_protocol.enter();
+        self.mouse_capture.enter();
 
         let result = self.read_line_helper(prompt);
         if result.is_err() {
@@ -1785,6 +1802,7 @@ impl Reedline {
             let _ignore = self.painter.show_cursor();
         }
 
+        self.mouse_capture.exit();
         self.bracketed_paste.exit();
         self.kitty_protocol.exit();
         terminal::disable_raw_mode()?;
@@ -1892,6 +1910,17 @@ impl Reedline {
         if self.input_mode == InputMode::NonIncrementalSearch {
             self.input_mode = InputMode::Regular;
         }
+
+        // Armed one-shot states belong to the read that armed them. GNU
+        // clears RL_STATE_NUMERICARG/RL_STATE_INPUTPENDING-class flags on
+        // read teardown; without these clears a break or exit leaks a
+        // digit argument, a pending quoted insert or char search, or a
+        // live menu into the next prompt.
+        self.pending_arg = None;
+        self.quoted_insert = false;
+        self.quoted_insert_count = 1;
+        self.pending_char_search = None;
+        self.deactivate_menus();
 
         self.suspended_state.take()
     }
@@ -2923,6 +2952,12 @@ impl Reedline {
             // Resumed (SIGCONT): restore the editor's terminal state.
             let _ignore = terminal::enable_raw_mode();
             self.repaint(prompt)?;
+            // The suspended painter state only matters while the read is
+            // actually parked (ExternalBreak path); after a live resume it
+            // must be cleared — leaving it set suppresses
+            // move_cursor_to_end for the rest of this read and seeds the
+            // next begin_read with a stale anchor.
+            self.suspended_state = None;
             Ok(EventStatus::Handled)
         }
         #[cfg(not(unix))]
@@ -3084,6 +3119,24 @@ impl Reedline {
                 // also lets an enclosing `UntilFound` keep trying.
                 Ok(EventStatus::Inapplicable)
             }
+            ReedlineEvent::Multiple(events) => {
+                // Regular-mode semantics inside the search: every event
+                // dispatches through this machine (niu's composite events
+                // and chord-timeout flushes arrive as `Multiple`).
+                let mut latest_signal = EventStatus::Inapplicable;
+                for event in events {
+                    match self.handle_history_search_event(event)? {
+                        EventStatus::Inapplicable => {}
+                        EventStatus::Exits(signal) => {
+                            return Ok(EventStatus::Exits(signal));
+                        }
+                        success => {
+                            latest_signal = success;
+                        }
+                    }
+                }
+                Ok(latest_signal)
+            }
             ReedlineEvent::CtrlD => {
                 if self.editor.is_empty() {
                     self.input_mode = InputMode::Regular;
@@ -3217,7 +3270,6 @@ impl Reedline {
             | ReedlineEvent::NonIncrementalSearch { .. }
             | ReedlineEvent::NonIncrementalSearchAgain { .. }
             | ReedlineEvent::PrintLastKbdMacro
-            | ReedlineEvent::Multiple(_)
             | ReedlineEvent::None
             | ReedlineEvent::HistoryHintWordComplete
             | ReedlineEvent::OpenEditor
@@ -3244,7 +3296,7 @@ impl Reedline {
     /// `Backspace` on an empty buffer aborts, ordinary edits apply.
     fn handle_noninc_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
         match event {
-            ReedlineEvent::UntilFound(events) | ReedlineEvent::Multiple(events) => {
+            ReedlineEvent::UntilFound(events) => {
                 for event in events {
                     match self.handle_noninc_search_event(event)? {
                         EventStatus::Inapplicable => {}
@@ -3254,6 +3306,25 @@ impl Reedline {
                     }
                 }
                 Ok(EventStatus::Inapplicable)
+            }
+            ReedlineEvent::Multiple(events) => {
+                // `Multiple` runs every event (unlike `UntilFound`, which
+                // stops at the first applicable one) — a composite like
+                // `[Edit(..), Enter]` inside the search must not drop the
+                // `Enter` just because the edit applied.
+                let mut latest_signal = EventStatus::Inapplicable;
+                for event in events {
+                    match self.handle_noninc_search_event(event)? {
+                        EventStatus::Inapplicable => {}
+                        EventStatus::Exits(signal) => {
+                            return Ok(EventStatus::Exits(signal));
+                        }
+                        success => {
+                            latest_signal = success;
+                        }
+                    }
+                }
+                Ok(latest_signal)
             }
             ReedlineEvent::Enter | ReedlineEvent::Submit | ReedlineEvent::SubmitOrNewline => {
                 // `_rl_nsearch_dosearch` (search.c:398): take the buffer
@@ -3704,6 +3775,7 @@ impl Reedline {
             }
             ReedlineEvent::CtrlD => {
                 if self.editor.is_empty() {
+                    self.deactivate_menus();
                     self.editor.reset_undo_stack();
                     Ok(EventStatus::Exits(Signal::CtrlD))
                 } else {
@@ -4532,8 +4604,14 @@ impl Reedline {
                         self.history_cursor.back(self.history.as_mut())?
                     }
                 }
-                _ => {
+                command => {
+                    // GNU leaves the search and re-executes the key
+                    // (isearch.c: a non-search command exits the search
+                    // mode and is then applied to the line). Discarding it
+                    // loses whole edits — a bracketed paste arrives as
+                    // `InsertString`, `Delete` arrives as itself.
                     self.input_mode = InputMode::Regular;
+                    self.run_edit_commands(std::slice::from_ref(command));
                 }
             }
         }
