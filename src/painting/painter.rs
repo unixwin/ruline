@@ -17,7 +17,7 @@ use {
         Prompt,
     },
     crossterm::{
-        cursor::{self, MoveTo, MoveToColumn, MoveUp, RestorePosition, SavePosition},
+        cursor::{self, MoveTo, RestorePosition, SavePosition},
         style::{Attribute, Print, ResetColor, SetAttribute},
         terminal::{self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
         QueueableCommand,
@@ -44,20 +44,6 @@ fn escape_as_drawn(text: &str) -> std::borrow::Cow<'_, str> {
             .into()
     } else {
         escape_control(text)
-    }
-}
-
-/// Rows below the prompt's start row where the input region begins — the row
-/// the prompt's *last* line occupies, everything above it being the leading
-/// lines a resize frame must not touch (`_rl_redisplay_after_sigwinch`'s
-/// `strrchr(rl_display_prompt, '\n')`, display.c:3534).
-fn input_region_row_offset(lines: &PromptLines, screen_width: u16) -> u16 {
-    if !lines.prompt_str_left.contains('\n') {
-        return 0;
-    }
-    match wrap_position([&*lines.prompt_str_left], screen_width) {
-        Some((_, row)) => row,
-        None => 0,
     }
 }
 
@@ -330,39 +316,6 @@ fn cursor_position_for_term(stdout: &W, is_term_dumb: bool) -> Result<Option<(u1
     }
 }
 
-// Test override for [`Painter::refresh_size_before_layout`]'s live size
-// query: `Some` answers that size, `None` answers "no tty". Unset (the
-// production default) runs the real `terminal::size()`.
-thread_local! {
-    static SIZE_QUERY_STUB: std::cell::Cell<Option<Option<(u16, u16)>>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// Pin the live size query's answer for tests of the per-paint refresh.
-#[cfg(test)]
-pub(crate) fn stub_size_query(size: Option<(u16, u16)>) {
-    SIZE_QUERY_STUB.with(|stub| stub.set(Some(size)));
-}
-
-/// Clear the stub installed by [`stub_size_query`].
-#[cfg(test)]
-pub(crate) fn clear_size_query_stub() {
-    SIZE_QUERY_STUB.with(|stub| stub.set(None));
-}
-
-/// The live console size, as a paint should re-read it. `None` when no
-/// console answers (redirected output, a test writer): the caller keeps its
-/// cached size, the fallback GNU's `_rl_get_screen_size` also takes
-/// (terminal.c:324-372) when the kernel winsize read fails.
-fn live_terminal_size(stdout_is_terminal: bool) -> Option<(u16, u16)> {
-    if let Some(stubbed) = SIZE_QUERY_STUB.with(|stub| stub.get()) {
-        return stubbed;
-    }
-    // Only a real terminal writer is attached to the console being asked;
-    // every test writer would turn the query into a spurious failure.
-    stdout_is_terminal.then(|| terminal::size().ok())?
-}
-
 /// The lines an external message prints as. A newline ends a line rather
 /// than starting an empty one, so `"a\n"` is one line and `""` still takes a
 /// row. A `\r` before a newline goes with it.
@@ -425,14 +378,13 @@ pub(crate) enum PromptStartRow {
     /// content the painter doesn't model since. The next `repaint_buffer`
     /// must re-query before trusting it.
     Stale(u16),
+    /// A resize happened and the terminal reported the *cursor* on
+    /// `cursor_row`. Where the prompt starts relative to it depends on how many
+    /// rows the prompt and the text before the cursor take at the new width,
+    /// which only the next `repaint_buffer` knows; it resolves this with
+    /// [`PromptStartRow::resolve_resize`].
+    Resized { cursor_row: u16 },
     /// Row matches the terminal as of the last successful query or paint.
-    ///
-    /// A resize no longer has its own state: GNU's resize answer moves
-    /// *relatively* from the recorded cursor offset and keeps this row in
-    /// sync by layout arithmetic (see [`Painter::repaint_buffer`]'s
-    /// `_rl_redisplay_after_sigwinch` frame), rather than re-anchoring from
-    /// an absolute cursor query whose answer raced the screen reflow
-    /// (niubash#822: orphaned copies of a multi-line prompt's first line).
     Verified(u16),
 }
 
@@ -444,7 +396,28 @@ impl PromptStartRow {
     pub(crate) fn last_known_row(self) -> u16 {
         match self {
             PromptStartRow::Verified(r) | PromptStartRow::Stale(r) => r,
+            // Between a resize and the next paint only the cursor row is known.
+            // The prompt starts on it or above it.
+            PromptStartRow::Resized { cursor_row } => cursor_row,
             PromptStartRow::Unverified => 0,
+        }
+    }
+
+    /// Turn a [`PromptStartRow::Resized`] cursor row into the row the prompt
+    /// starts on. `lines_before_cursor` is the number of rows from the prompt
+    /// start through the cursor's row at the current width, so at least 1.
+    /// Every other state is left alone.
+    pub(crate) fn resolve_resize(&mut self, lines_before_cursor: u16) {
+        if let PromptStartRow::Resized { cursor_row } = self {
+            debug_assert!(
+                lines_before_cursor >= 1,
+                "lines_before_cursor counts the cursor's own row"
+            );
+            let r = cursor_row.saturating_sub(lines_before_cursor - 1);
+            // The row is derived from the cursor position the terminal just
+            // reported, and the drift check only repairs a row that sits
+            // below the cursor, so there is nothing left to verify.
+            *self = PromptStartRow::Verified(r);
         }
     }
 
@@ -492,25 +465,6 @@ pub struct Painter {
     /// reset: a resize, a new reported size or a measured growth changes the
     /// height, and with it the answer.
     bottom_confirmed_at: Option<u16>,
-    /// A resize arrived and the next `repaint_buffer` must answer it the way
-    /// GNU readline does (`_rl_redisplay_after_sigwinch`, display.c:3508):
-    /// clear the input region and redraw only the last prompt line and the
-    /// buffer, never re-emitting the prompt's leading lines.
-    resize_redisplay: bool,
-    /// The frame that answers a resize must be followed by one size re-read:
-    /// under Windows Terminal's `PSEUDOCONSOLE_RESIZE_QUIRK` ConPTY the
-    /// resize is only applied when conhost processes output, so the frame's
-    /// own flush is what makes the true size queryable.
-    recheck_size_after_frame: bool,
-    /// Rows below the prompt's start row that the last paint left the cursor
-    /// on (`_rl_last_v_pos`'s counterpart). `None` after a large-buffer
-    /// paint, whose skipped rows and row-0 anchor the relative resize frame
-    /// cannot move from — a resize there takes the ordinary repaint.
-    last_cursor_row_offset: Option<u16>,
-    /// Rows below the prompt's start row that the input region — the last
-    /// line of the prompt plus the buffer — starts on. The resize frame
-    /// clears from here down and redraws from here.
-    last_region_row_offset: u16,
 }
 
 impl Painter {
@@ -531,10 +485,6 @@ impl Painter {
             last_layout: None,
             cursor_hidden: false,
             bottom_confirmed_at: None,
-            resize_redisplay: false,
-            recheck_size_after_frame: false,
-            last_cursor_row_offset: None,
-            last_region_row_offset: 0,
         }
     }
 
@@ -882,10 +832,11 @@ impl Painter {
     }
 
     /// Main painter for the prompt and buffer
-    /// It queues all of the actions required to paint the prompt together with
-    /// lines that make the buffer, then — when a resize armed the re-check —
-    /// re-reads the console size *after* the frame has been flushed and
-    /// repaints at the fresh size if it moved (see the re-check below).
+    /// It queues all the actions required to print the prompt together with
+    /// lines that make the buffer.
+    /// Using the prompt lines object in this function it is estimated how the
+    /// prompt should scroll up and how much space is required to print all the
+    /// lines for the buffer
     ///
     /// Note. The `ScrollUp` operation in `crossterm` deletes lines from the top of
     /// the screen.
@@ -894,58 +845,6 @@ impl Painter {
         prompt: &dyn Prompt,
         lines: &PromptLines,
         prompt_mode: PromptEditMode,
-        menu: Option<&ReedlineMenu>,
-        use_ansi_coloring: bool,
-        cursor_config: &Option<CursorConfig>,
-    ) -> Result<()> {
-        self.paint_buffer_once(
-            prompt,
-            lines,
-            &prompt_mode,
-            menu,
-            use_ansi_coloring,
-            cursor_config,
-        )?;
-
-        // Windows Terminal creates its ConPTY with
-        // PSEUDOCONSOLE_RESIZE_QUIRK, under which conhost defers applying a
-        // resize until it next processes output: until OUR frame above has
-        // been flushed, every size query — the WinAPI read included —
-        // answers with the OLD console, and the resize event's payload can
-        // predate the application too (niubash#822: the frame painted from
-        // the event laid a completion menu out at the old width in a
-        // freshly maximized window). `rl_resize_terminal` (terminal.c:429-446)
-        // re-reads the tty only *after* the resize has been applied and only
-        // then hands the redraw to `_rl_redisplay_after_sigwinch`; the
-        // analogue of "after it has been applied" under the quirk is "after
-        // our frame's output". Re-read once, and when the console now
-        // disagrees with the size the frame was painted at, paint again.
-        if self.recheck_size_after_frame {
-            self.recheck_size_after_frame = false;
-            let stdout_is_terminal = matches!(self.stdout, W::Terminal(_));
-            if let Some(size) = live_terminal_size(stdout_is_terminal) {
-                if size != self.terminal_size {
-                    self.terminal_size = size;
-                    self.paint_buffer_once(
-                        prompt,
-                        lines,
-                        &prompt_mode,
-                        menu,
-                        use_ansi_coloring,
-                        cursor_config,
-                    )?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// [`Painter::repaint_buffer`]'s single paint: one frame, flushed.
-    fn paint_buffer_once(
-        &mut self,
-        prompt: &dyn Prompt,
-        lines: &PromptLines,
-        prompt_mode: &PromptEditMode,
         menu: Option<&ReedlineMenu>,
         use_ansi_coloring: bool,
         cursor_config: &Option<CursorConfig>,
@@ -959,21 +858,11 @@ impl Painter {
 
         let screen_width = self.screen_width();
 
-        // A resize armed the GNU-style resize frame (display.c:3508
-        // `_rl_redisplay_after_sigwinch`). Take the flag now: this paint is
-        // the one that answers the resize, and no later paint should. The
-        // frame needs the *old* row bookkeeping, so capture it before this
-        // paint recomputes any of it.
-        let sigwinch_frame = self.resize_redisplay
-            && !self.term_is_dumb
-            && matches!(self.prompt_start_row, PromptStartRow::Verified(_))
-            && self.last_cursor_row_offset.is_some();
-        let old_region_row_offset = self.last_region_row_offset;
-        let old_cursor_row_offset = self.last_cursor_row_offset;
-        self.resize_redisplay = false;
-
         self.prompt_height = lines.prompt_height(screen_width);
         let lines_before_cursor = lines.required_lines(screen_width, true, None);
+
+        // Calibrate prompt start position for multi-line prompt/content before cursor. Check issue #841/#848/#930
+        self.prompt_start_row.resolve_resize(lines_before_cursor);
 
         self.reconcile_stale_anchor();
 
@@ -1000,103 +889,34 @@ impl Painter {
             // Marking the painter state as larger buffer to avoid animations
             self.large_buffer = required_lines >= screen_height;
 
-            let margin_cursor_row;
-            let right_prompt;
-            // The GNU resize frame (`_rl_redisplay_after_sigwinch`,
-            // display.c:3508): clear the input region and redraw the last
-            // prompt line and the buffer, moving *relatively* from wherever
-            // the resize left the cursor. Never eligible when the content
-            // needs scroll management or the anchor was never established —
-            // those keep the ordinary full repaint below.
-            if sigwinch_frame
-                && !self.large_buffer
-                && !anchor_uninitialized
-                && required_lines < screen_height
-            {
-                // display.c:3517-3522: cr, clear the visible input line(s),
-                // move to the region's top row. The cursor sits
-                // `old_cursor_row_offset` rows below the prompt start (its
-                // own recorded position, `_rl_last_v_pos`'s counterpart), so
-                // moving up `rows_up` lands on the input region's first row —
-                // the row the prompt's *last* line occupies. Then clear to
-                // the end of the screen, which covers every row the region
-                // (and a menu under it) had.
-                let rows_up = old_cursor_row_offset
-                    .unwrap_or_default()
-                    .saturating_sub(old_region_row_offset);
-                if rows_up > 0 {
-                    self.stdout.queue(MoveUp(rows_up))?;
+            // Moving the start position of the cursor based on the size of the required lines
+            if self.large_buffer || anchor_uninitialized {
+                for _ in 0..screen_height.saturating_sub(lines_before_cursor) {
+                    self.stdout.queue(Print(&coerce_crlf("\n")))?;
                 }
-                self.stdout
-                    .queue(MoveToColumn(0))?
-                    .queue(Clear(ClearType::FromCursorDown))?;
-
-                // Keep the model's row bookkeeping in sync without querying
-                // anything (GNU re-syncs `_rl_last_c_pos`/`_rl_last_v_pos`
-                // the same way, from its own layout): the region's first row
-                // on screen did not move — the frame redrew it in place — but
-                // the leading prompt lines above it now wrap at the new
-                // width, so the prompt's start row shifts by however many
-                // rows that re-wrapping adds or removes.
-                let new_region_row_offset = input_region_row_offset(lines, screen_width);
-                let region_row = self
-                    .prompt_start_row
-                    .last_known_row()
-                    .saturating_add(old_region_row_offset);
-                self.prompt_start_row
-                    .mark_verified(region_row.saturating_sub(new_region_row_offset));
-                self.last_region_row_offset = new_region_row_offset;
-
-                let layout = self.compute_layout(lines, menu);
-                right_prompt = layout.right_prompt;
-                margin_cursor_row =
-                    self.print_resize_frame(prompt, lines, menu, use_ansi_coloring, &layout)?;
-                self.last_layout = Some(layout);
-            } else {
-                // Moving the start position of the cursor based on the size of the required lines
-                if self.large_buffer || anchor_uninitialized {
-                    for _ in 0..screen_height.saturating_sub(lines_before_cursor) {
-                        self.stdout.queue(Print(&coerce_crlf("\n")))?;
-                    }
-                    // The reset puts the prompt at row 0; cache is back in sync.
-                    self.prompt_start_row.mark_verified(0);
-                } else if required_lines >= remaining_lines {
-                    let extra = required_lines.saturating_sub(remaining_lines);
-                    self.queue_universal_scroll(extra)?;
-                    let scrolled_row = self.prompt_start_row.last_known_row().saturating_sub(extra);
-                    self.prompt_start_row.mark_verified(scrolled_row);
-                }
-
-                // Moving the cursor to the start of the prompt
-                // from this position everything will be printed
-                let anchor_row = self.prompt_start_row.last_known_row();
-                self.clear_from_anchor(anchor_row)?;
-
-                let layout = self.compute_layout(lines, menu);
-                right_prompt = layout.right_prompt;
-
-                margin_cursor_row = if self.large_buffer {
-                    self.print_large_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
-                } else {
-                    self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
-                };
-                self.last_layout = Some(layout);
-                self.last_region_row_offset = input_region_row_offset(lines, screen_width);
+                // The reset puts the prompt at row 0; cache is back in sync.
+                self.prompt_start_row.mark_verified(0);
+            } else if required_lines >= remaining_lines {
+                let extra = required_lines.saturating_sub(remaining_lines);
+                self.queue_universal_scroll(extra)?;
+                let scrolled_row = self.prompt_start_row.last_known_row().saturating_sub(extra);
+                self.prompt_start_row.mark_verified(scrolled_row);
             }
 
-            // Record where this paint leaves the cursor relative to the prompt
-            // start (`distance_from_prompt`: the row the restored SavePosition
-            // lands on, or the margin row the placement moved it to): the
-            // next resize frame moves up from there. Only meaningful for the
-            // small path — the large path skips rows off-screen and its
-            // anchor is row 0, so a resize there takes the ordinary repaint.
-            self.last_cursor_row_offset = if self.large_buffer {
-                None
+            // Moving the cursor to the start of the prompt
+            // from this position everything will be printed
+            let anchor_row = self.prompt_start_row.last_known_row();
+            self.clear_from_anchor(anchor_row)?;
+
+            let layout = self.compute_layout(lines, menu);
+
+            let margin_cursor_row = if self.large_buffer {
+                self.print_large_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
             } else {
-                Some(lines.distance_from_prompt(screen_width))
+                self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
             };
 
-            self.exit_right_prompt = right_prompt.map(|rp| {
+            self.exit_right_prompt = layout.right_prompt.map(|rp| {
                 let text = coerce_crlf(&lines.prompt_str_right);
                 let text = if use_ansi_coloring {
                     format!("{}{}", prompt.get_prompt_right_color().prefix(), text)
@@ -1105,6 +925,8 @@ impl Painter {
                 };
                 (text, rp)
             });
+
+            self.last_layout = Some(layout);
 
             // The last_required_lines is used to calculate safe range of the current prompt.
             self.last_required_lines = required_lines;
@@ -1129,7 +951,7 @@ impl Painter {
 
             let shape = cursor_config
                 .as_ref()
-                .and_then(|shapes| shapes.shape_for(prompt_mode));
+                .and_then(|shapes| shapes.shape_for(&prompt_mode));
             if let Some(shape) = shape {
                 self.stdout.queue(shape)?;
             }
@@ -1529,87 +1351,6 @@ impl Painter {
         Ok(cursor_row)
     }
 
-    /// The redraw half of `_rl_redisplay_after_sigwinch` (display.c:3534-3537):
-    /// `strrchr(rl_display_prompt, '\n')` then `redraw_prompt(++t)` — the
-    /// prompt's *last* line only, with the buffer, on the rows the caller
-    /// already cleared. The leading lines were written when the prompt was
-    /// first drawn and stay in place: re-emitting them is what piled orphan
-    /// copies of a multi-line prompt's first line up under Windows Terminal
-    /// (niubash#822), because the erase computed for one width never quite
-    /// covered the reflowed rows of the other.
-    ///
-    /// No semantic markers: the prompt and its input region are being
-    /// *redrawn*, not started, so a resize must not re-announce OSC 133 A/B.
-    fn print_resize_frame(
-        &mut self,
-        prompt: &dyn Prompt,
-        lines: &PromptLines,
-        menu: Option<&ReedlineMenu>,
-        use_ansi_coloring: bool,
-        layout: &PromptLayout,
-    ) -> Result<Option<u16>> {
-        // display.c:3534: everything after the last `\n` of the prompt
-        // (`strrchr` + `++t` — a prompt ending in `\n` redraws the empty
-        // last line the indicator sits on, where `lines().last()` would
-        // hand back the line *before* the break instead).
-        let last_prompt_line = match lines.prompt_str_left.rfind('\n') {
-            Some(byte) => &lines.prompt_str_left[byte + 1..],
-            None => &lines.prompt_str_left,
-        };
-
-        // print the last prompt line with color
-        if use_ansi_coloring {
-            self.stdout
-                .queue(Print(prompt.get_prompt_color().prefix()))?;
-        }
-
-        self.stdout.queue(Print(last_prompt_line))?;
-
-        if use_ansi_coloring {
-            self.stdout
-                .queue(Print(prompt.get_indicator_color().prefix()))?;
-        }
-
-        self.stdout
-            .queue(Print(&coerce_crlf(&lines.prompt_indicator)))?;
-
-        if use_ansi_coloring {
-            self.stdout
-                .queue(Print(prompt.get_prompt_right_color().prefix()))?;
-        }
-
-        self.print_right_prompt(lines, layout, [last_prompt_line, &lines.prompt_indicator])?;
-
-        if use_ansi_coloring {
-            self.stdout
-                .queue(SetAttribute(Attribute::Reset))?
-                .queue(ResetColor)?;
-        }
-
-        self.stdout.queue(Print(&lines.before_cursor))?;
-        if !self.term_is_dumb {
-            self.stdout.queue(SavePosition)?;
-        }
-        self.stdout.queue(Print(&lines.after_cursor))?;
-
-        // Judged from the last prompt line, which is what this frame printed
-        // of the prompt — counting the leading lines here would place the
-        // cursor below where it actually rests.
-        let cursor_row = self.margin_cursor_row([
-            last_prompt_line,
-            &lines.prompt_indicator,
-            &lines.before_cursor,
-        ]);
-
-        if let Some(menu) = menu {
-            self.print_menu(menu, use_ansi_coloring, layout)?;
-        } else {
-            self.stdout.queue(Print(&lines.hint))?;
-        }
-
-        Ok(cursor_row)
-    }
-
     fn print_large_buffer(
         &mut self,
         prompt: &dyn Prompt,
@@ -1720,53 +1461,28 @@ impl Painter {
     }
 
     /// Updates prompt origin and offset to handle a screen resize event
-    ///
-    /// GNU readline answers a resize by re-reading the tty and then redrawing
-    /// only what the resize could have disturbed (`rl_resize_terminal`,
-    /// terminal.c:429-446: `_rl_get_screen_size` then
-    /// `_rl_redisplay_after_sigwinch`). It does *not* re-anchor from an
-    /// absolute cursor query at resize time: the signal carries no position
-    /// worth trusting, and after the screen reflow every cached absolute row
-    /// is stale anyway. `_rl_redisplay_after_sigwinch` (display.c:3508)
-    /// moves *relatively* from wherever the cursor sits, so this records the
-    /// size and arms the relative redraw instead of measuring.
-    ///
-    /// The re-anchoring the old measurement did is not lost: the resize
-    /// frame keeps the model's row bookkeeping in sync (see
-    /// [`Painter::repaint_buffer`]), and the next prompt cycle's
-    /// [`Painter::anchor_prompt`] still queries absolutely once the screen
-    /// has settled.
     pub(crate) fn handle_resize(&mut self, width: u16, height: u16) {
         self.terminal_size = (width, height);
         let term = var_os("TERM");
         self.term_is_dumb = term_is_dumb(term.as_deref());
 
-        self.resize_redisplay = true;
-        self.recheck_size_after_frame = true;
-    }
+        self.invalidate_prompt_start_row();
 
-    /// Re-read the live console size before a paint's layout math runs, the
-    /// per-prompt re-check GNU makes through `checkwinsize` (the shell) and
-    /// `_rl_get_screen_size` (readline) — a cached size is only ever a
-    /// fallback for when nothing answers the query. niubash#822: completion
-    /// menus lay out from `screen_width()` before `repaint_buffer` runs, so
-    /// the refresh has to happen at the top of the paint cycle, not inside
-    /// it, or a menu keeps laying out at the width of the *previous* frame
-    /// (three ~60-column menu columns in a 280-column window).
-    ///
-    /// Skipped on the resize frame itself: the event that armed it carried
-    /// the freshest size available *at event time*, while the query may
-    /// still answer with the pre-resize console (Windows Terminal defers
-    /// the resize until conhost processes output — see
-    /// [`Painter::repaint_buffer`]'s post-flush re-read). The frame's own
-    /// flush is what makes the queryable size catch up.
-    pub(crate) fn refresh_size_before_layout(&mut self) {
-        if self.resize_redisplay {
-            return;
-        }
-        let stdout_is_terminal = matches!(self.stdout, W::Terminal(_));
-        if let Some((width, height)) = live_terminal_size(stdout_is_terminal) {
-            self.terminal_size = (width, height);
+        // `cursor::position()` is blocking and can time out, but a
+        // resize happens infrequently enough that we accept the cost.
+        // The terminal only reports the cursor, so that is what gets
+        // recorded; the next `repaint_buffer` works out the prompt row.
+        //
+        // Known bug: on iterm2 and kitty, clearing the screen via CMD-K
+        // doesn't reset the cursor position — possibly a `position()`
+        // bug.
+        //
+        // Measured, so the row raises a `height` that under-reports: the next
+        // paint takes this row as verified and never asks again, which leaves
+        // this read as the only proof of the height until the next reported
+        // size.
+        if let Ok(Some((_, cursor_row))) = self.measure_cursor_position() {
+            self.prompt_start_row = PromptStartRow::Resized { cursor_row };
         }
     }
 
@@ -2543,20 +2259,55 @@ mod tests {
         assert_eq!(&p.stdout.captured()[before_show..], b"\x1b[?25h");
     }
 
-    // niubash#822: a resize answers with `_rl_redisplay_after_sigwinch`
-    // (display.c:3508) — the last prompt line and the buffer only, moved to
-    // relatively from the recorded cursor offset. The four properties below
-    // pin the frame this repo's own resize path produces.
+    #[rstest]
+    #[case::cursor_on_the_prompt_row(4, 1, 4)]
+    #[case::cursor_two_rows_below(7, 3, 5)]
+    #[case::prompt_taller_than_the_rows_above(1, 3, 0)]
+    fn test_resolve_resize_moves_up_to_the_prompt_start(
+        #[case] cursor_row: u16,
+        #[case] lines_before_cursor: u16,
+        #[case] prompt_row: u16,
+    ) {
+        let mut row = PromptStartRow::Resized { cursor_row };
+
+        row.resolve_resize(lines_before_cursor);
+
+        assert!(!matches!(row, PromptStartRow::Resized { .. }));
+        assert_eq!(row.last_known_row(), prompt_row);
+    }
+
+    #[rstest]
+    #[case::unverified(PromptStartRow::Unverified)]
+    #[case::stale(PromptStartRow::Stale(4))]
+    #[case::verified(PromptStartRow::Verified(4))]
+    fn test_resolve_resize_leaves_a_prompt_row_alone(#[case] before: PromptStartRow) {
+        let mut row = before;
+
+        row.resolve_resize(3);
+
+        assert_eq!(row, before);
+    }
+
+    // Output painted between a resize and the next paint (an external message)
+    // invalidates the anchor. That must not forget the row is a cursor row.
     #[test]
-    fn resize_frame_redraws_only_the_last_prompt_line() {
+    fn test_invalidate_keeps_a_resized_cursor_row() {
+        let mut row = PromptStartRow::Resized { cursor_row: 7 };
+
+        row.invalidate();
+
+        assert_eq!(row, PromptStartRow::Resized { cursor_row: 7 });
+    }
+
+    #[test]
+    fn test_repaint_after_resize_anchors_above_the_cursor() {
         let mut p = Painter::new(W::capture());
-        p.terminal_size = (40, 10);
+        p.terminal_size = (20, 10);
         p.term_is_dumb = false;
-        p.prompt_start_row = PromptStartRow::Verified(4);
-        // An ordinary paint first, so the frame has cursor/region offsets to
-        // move from: the prompt's leading line lands on row 4, the input
-        // region on row 5.
-        let lines = make_lines("leading\n", "> ", "", "one", "");
+        p.prompt_start_row = PromptStartRow::Resized { cursor_row: 6 };
+        // Two rows through the cursor, so the prompt starts one row up.
+        let lines = make_lines("left", "> ", "", "one\ntwo", "");
+
         p.repaint_buffer(
             &TestPrompt,
             &lines,
@@ -2565,245 +2316,9 @@ mod tests {
             false,
             &None,
         )
-        .expect("first repaint failed");
-        let first_paint_len = p.stdout.captured().len();
+        .expect("repaint_buffer failed");
 
-        p.handle_resize(60, 10);
-        p.repaint_buffer(
-            &TestPrompt,
-            &lines,
-            PromptEditMode::Default,
-            None,
-            false,
-            &None,
-        )
-        .expect("resize repaint failed");
-
-        // display.c:3534: the redraw starts after the prompt's last `\n`.
-        // The leading line was drawn by the first paint and must not appear
-        // again — re-emitting it is what stacked orphan copies under WT.
-        let frame = String::from_utf8_lossy(&p.stdout.captured()[first_paint_len..]);
-        assert!(
-            !frame.contains("leading"),
-            "no re-emission of the leading line: {frame:?}"
-        );
-        assert!(frame.contains("> "), "the last prompt line is redrawn");
-        assert!(frame.contains('o'), "the buffer is redrawn");
-        assert!(frame.contains("\x1b[J"), "the region is cleared downward");
-    }
-
-    #[test]
-    fn resize_frame_moves_up_from_the_cursor_to_the_region_row() {
-        let mut p = Painter::new(W::capture());
-        p.terminal_size = (40, 10);
-        p.term_is_dumb = false;
-        p.prompt_start_row = PromptStartRow::Verified(4);
-        // 50 columns of buffer wrap at 40, so the cursor rests one row below
-        // the region start: the frame must move up exactly that one row.
-        let wrapped_buffer = "x".repeat(50);
-        let lines = make_lines("leading\n", "> ", "", &wrapped_buffer, "");
-        p.repaint_buffer(
-            &TestPrompt,
-            &lines,
-            PromptEditMode::Default,
-            None,
-            false,
-            &None,
-        )
-        .expect("first repaint failed");
-        assert_eq!(p.last_region_row_offset, 1);
-        assert_eq!(p.last_cursor_row_offset, Some(2));
-        let first_paint_len = p.stdout.captured().len();
-
-        p.handle_resize(60, 10);
-        p.repaint_buffer(
-            &TestPrompt,
-            &lines,
-            PromptEditMode::Default,
-            None,
-            false,
-            &None,
-        )
-        .expect("resize repaint failed");
-
-        let frame = String::from_utf8_lossy(&p.stdout.captured()[first_paint_len..]);
-        assert!(
-            frame.contains("\x1b[1A"),
-            "the frame moves up one row relatively: {frame:?}"
-        );
-        assert!(!frame.contains("leading"), "leading line stays put");
-        // The input region's row is unchanged; the anchor follows the
-        // re-wrapped leading lines ("leading" still fits at 60 columns).
-        assert_eq!(p.last_region_row_offset, 1);
-        assert_eq!(p.prompt_start_row, PromptStartRow::Verified(4));
-    }
-
-    #[test]
-    fn resize_frame_without_a_verified_anchor_falls_back_to_the_full_repaint() {
-        let mut p = Painter::new(W::capture());
-        p.terminal_size = (40, 10);
-        p.term_is_dumb = false;
-        p.prompt_start_row = PromptStartRow::Stale(4);
-        let lines = make_lines("leading\n", "> ", "", "one", "");
-        p.handle_resize(60, 10);
-        p.repaint_buffer(
-            &TestPrompt,
-            &lines,
-            PromptEditMode::Default,
-            None,
-            false,
-            &None,
-        )
-        .expect("repaint failed");
-        // The ordinary path re-anchors via the drift check, not the frame,
-        // and it re-emits the full prompt as it always did.
-        assert!(!p.resize_redisplay);
-        let frame = String::from_utf8_lossy(p.stdout.captured());
-        assert!(frame.contains("leading"), "the full repaint ran");
-    }
-
-    // niubash#822: menus lay out from `screen_width()` before
-    // `repaint_buffer` runs, so a paint cycle must re-read the live console
-    // size first (GNU's per-prompt `checkwinsize` analogue); the cached
-    // value survives only when nothing answers the query.
-    #[test]
-    fn layout_refresh_takes_the_live_query_over_the_cache() {
-        super::stub_size_query(Some((100, 30)));
-        let mut p = Painter::new(W::capture());
-        p.terminal_size = (40, 10);
-        p.refresh_size_before_layout();
-        super::clear_size_query_stub();
-        assert_eq!((p.screen_width(), p.screen_height()), (100, 30));
-    }
-
-    #[test]
-    fn layout_refresh_keeps_the_cached_size_when_no_console_answers() {
-        super::stub_size_query(None);
-        let mut p = Painter::new(W::capture());
-        p.terminal_size = (40, 10);
-        p.refresh_size_before_layout();
-        super::clear_size_query_stub();
-        assert_eq!((p.screen_width(), p.screen_height()), (40, 10));
-    }
-
-    #[test]
-    fn layout_refresh_skips_the_query_for_the_resize_frame() {
-        // The resize event armed the frame with the freshest size available
-        // at event time; a pre-frame query could only race it back to the
-        // pre-resize console (see the post-flush re-read below).
-        super::stub_size_query(Some((40, 10)));
-        let mut p = Painter::new(W::capture());
-        p.terminal_size = (60, 10);
-        p.handle_resize(60, 10);
-        p.refresh_size_before_layout();
-        super::clear_size_query_stub();
-        assert_eq!(p.screen_width(), 60);
-    }
-
-    // niubash#822, the Windows Terminal `PSEUDOCONSOLE_RESIZE_QUIRK` half:
-    // the deferred resize is applied when conhost processes output — the
-    // resize frame's own flush — so only a size read taken AFTER the frame
-    // can see the new console. When that post-flush read disagrees with
-    // what the frame was painted at, the paint runs again at the fresh
-    // size (`rl_resize_terminal`'s re-read-then-redisplay,
-    // terminal.c:429-446).
-    #[test]
-    fn resize_frame_repaints_at_the_post_flush_size_when_the_console_moved() {
-        let mut p = Painter::new(W::capture());
-        p.terminal_size = (40, 10);
-        p.term_is_dumb = false;
-        p.prompt_start_row = PromptStartRow::Verified(4);
-        let lines = make_lines("leading\n", "> ", "", "one", "");
-        // Establish the on-screen geometry at 40 columns (no stub: no
-        // console answers, the cached size stands).
-        p.handle_resize(40, 10);
-        p.repaint_buffer(
-            &TestPrompt,
-            &lines,
-            PromptEditMode::Default,
-            None,
-            false,
-            &None,
-        )
-        .expect("first repaint failed");
-        let established_len = p.stdout.captured().len();
-
-        // From here every live query answers 60 columns, as the console does
-        // once the frame's output applied the resize; the event's payload
-        // still said 40.
-        super::stub_size_query(Some((60, 10)));
-        p.handle_resize(40, 10);
-        p.repaint_buffer(
-            &TestPrompt,
-            &lines,
-            PromptEditMode::Default,
-            None,
-            false,
-            &None,
-        )
-        .expect("resize repaint failed");
-        super::clear_size_query_stub();
-        let frame = String::from_utf8_lossy(&p.stdout.captured()[established_len..]);
-        let frame = frame.as_ref();
-
-        assert_eq!(p.screen_width(), 60, "the flushed console's size wins");
-        assert_eq!(
-            frame.matches("leading").count(),
-            1,
-            "the second (ordinary) paint re-emits the full prompt exactly once: {frame:?}"
-        );
-        assert!(
-            frame.contains("\x1b[J"),
-            "the resize frame's relative clear is in the stream"
-        );
-    }
-
-    #[test]
-    fn resize_frame_paints_once_when_the_flushed_console_agrees() {
-        let mut p = Painter::new(W::capture());
-        p.terminal_size = (40, 10);
-        p.term_is_dumb = false;
-        p.prompt_start_row = PromptStartRow::Verified(4);
-        let lines = make_lines("leading\n", "> ", "", "one", "");
-        p.handle_resize(40, 10);
-        p.repaint_buffer(
-            &TestPrompt,
-            &lines,
-            PromptEditMode::Default,
-            None,
-            false,
-            &None,
-        )
-        .expect("first repaint failed");
-        let established_len = p.stdout.captured().len();
-
-        // The post-flush query agrees with the payload: one frame, no
-        // second paint.
-        super::stub_size_query(Some((40, 10)));
-        p.handle_resize(40, 10);
-        p.repaint_buffer(
-            &TestPrompt,
-            &lines,
-            PromptEditMode::Default,
-            None,
-            false,
-            &None,
-        )
-        .expect("resize repaint failed");
-        super::clear_size_query_stub();
-        let frame = String::from_utf8_lossy(&p.stdout.captured()[established_len..]);
-        let frame = frame.as_ref();
-
-        assert_eq!(p.screen_width(), 40);
-        let frames = frame
-            .split("\x1b[?2026l")
-            .filter(|c| c.contains("> "))
-            .count();
-        assert_eq!(frames, 1, "one frame when nothing moved: {frame:?}");
-        assert!(
-            !frame.contains("leading"),
-            "the leading line is never re-emitted"
-        );
+        assert_eq!(p.prompt_start_row, PromptStartRow::Verified(5));
     }
 
     // A measured row raises a `terminal::size()` that under-reports, and leaves
@@ -2902,11 +2417,6 @@ mod tests {
     fn test_prompt_does_not_climb_after_a_resize_that_under_reports() {
         let mut painter = Painter::new(W::sink_with_cursor_at((0, 35)));
         painter.handle_resize(80, 10);
-        // The resize frame keeps the model's own rows, so the height
-        // under-report is caught the way it is after external output
-        // scrolled the screen: a stale anchor's drift check measures the
-        // cursor and grows the height to fit the row it answered.
-        painter.prompt_start_row = PromptStartRow::Stale(35);
 
         let anchors: Vec<u16> = (0..4)
             .map(|_| {
@@ -2995,42 +2505,38 @@ mod tests {
         assert_eq!(painter.prompt_start_row, PromptStartRow::Verified(3));
     }
 
-    /// Messages that scroll past a bottom nobody confirmed cannot trust their
-    /// own row count, so the commit asks. The answer wins, and it can also
-    /// raise a height the terminal under-reported. (An anchor nobody checked
-    /// used to reach this ask too, via the resize state that no longer
-    /// exists; a `Stale` anchor is measured and settled by the reconcile up
-    /// front instead.)
+    /// From an anchor nobody checked, such as an unresolved resize, the
+    /// count would inherit its error, so the commit asks. The answer wins,
+    /// and it can also raise a height the terminal under-reported.
     #[test]
-    fn external_messages_scrolling_an_unconfirmed_bottom_ask_for_the_row() {
+    fn external_messages_from_an_unchecked_anchor_ask_for_the_row() {
         let mut painter = Painter::new(W::sink_with_cursor_at((0, 40)));
         painter.terminal_size = (80, 10);
         painter.term_is_dumb = false;
-        painter.prompt_start_row = PromptStartRow::Verified(2);
+        painter.prompt_start_row = PromptStartRow::Resized { cursor_row: 2 };
 
-        // Ten message rows from row 2 on a 10-row screen: the count runs
-        // past the bottom, and that bottom was never confirmed.
         painter
-            .print_external_message(vec!["a\nb\nc\nd\ne\nf\ng\nh\ni\nj".to_string()])
+            .print_external_message(vec!["msg".to_string()])
             .expect("print_external_message failed");
 
         assert_eq!(painter.screen_height(), 41);
         assert_eq!(painter.prompt_start_row, PromptStartRow::Verified(40));
     }
 
-    /// The ask closes its own frame, since the query after it has to get
-    /// through, and with no answer keeps the count but leaves it `Stale` for
-    /// the next paint to check.
+    /// The fallback closes its own frame, since the query after it has to
+    /// get through, and with no answer keeps the count but leaves it `Stale`
+    /// for the next paint to check. An unresolved resize is the anchor the
+    /// reconcile up front cannot settle.
     #[test]
-    fn external_messages_ask_without_an_answer_closes_their_frame() {
+    fn external_messages_from_an_unresolved_anchor_close_their_frame() {
         let mut p = capturing_painter_anchored_at(5);
-        p.print_external_message(vec!["a\nb\nc\nd\ne\nf".into()])
+        p.prompt_start_row = PromptStartRow::Resized { cursor_row: 5 };
+        p.print_external_message(vec!["one".into()])
             .expect("print_external_message failed");
         let out = String::from_utf8_lossy(p.stdout.captured()).into_owned();
 
         assert!(out.ends_with("\x1b[?2026l"), "{out:?}");
-        // No cursor answer: the count, capped at the reported last row.
-        assert_eq!(p.prompt_start_row, PromptStartRow::Stale(9));
+        assert_eq!(p.prompt_start_row, PromptStartRow::Stale(6));
     }
 
     /// A write that fails mid-commit leaves no repaint to close the frame, so
