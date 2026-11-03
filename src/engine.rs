@@ -5280,6 +5280,12 @@ impl Reedline {
     ///
     /// Includes the highlighting and hinting calls.
     fn buffer_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
+        // niubash#822 / GNU `checkwinsize`: re-read the live console size
+        // before any layout math runs. The menus below lay out from
+        // `screen_width()`, so refreshing inside `repaint_buffer` would be
+        // one frame too late for them.
+        self.painter.refresh_size_before_layout();
+
         let use_ansi_coloring = self.effective_ansi_coloring();
         let cursor_position_in_buffer = self.editor.insertion_point();
         let buffer_to_paint = self.editor.get_buffer();
@@ -7621,6 +7627,61 @@ mod tests {
             (rl.painter.screen_width(), rl.painter.screen_height()),
             (120, 40)
         );
+    }
+
+    /// niubash#822: a resize event must reach the paint as GNU's
+    /// `_rl_redisplay_after_sigwinch` (display.c:3508) — the repaint it
+    /// triggers redraws the prompt's *last* line and the buffer, and never
+    /// re-emits the leading lines of a multi-line prompt (re-emitting them
+    /// stacked orphan copies under Windows Terminal).
+    #[test]
+    fn resize_event_repaint_redraws_only_the_last_prompt_line() {
+        use std::borrow::Cow;
+
+        struct TwoLinePrompt;
+        impl Prompt for TwoLinePrompt {
+            fn render_prompt_left(&self) -> Cow<'_, str> {
+                "FIRST-LINE\n".into()
+            }
+            fn render_prompt_right(&self) -> Cow<'_, str> {
+                "".into()
+            }
+            fn render_prompt_indicator(&self, _: PromptEditMode) -> Cow<'_, str> {
+                "second ".into()
+            }
+            fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+                "".into()
+            }
+            fn render_prompt_history_search_indicator(
+                &self,
+                _: PromptHistorySearch,
+            ) -> Cow<'_, str> {
+                "".into()
+            }
+        }
+
+        let mut rl = seam_engine(Box::<crate::Emacs>::default());
+        rl.painter = Painter::new(W::capture());
+        rl.painter.force_prompt_anchored_for_test(4);
+        let prompt = TwoLinePrompt;
+
+        // Establish the on-screen geometry at 40 columns: an ordinary paint
+        // (the resize frame is not eligible yet, no cursor offset recorded).
+        // The batch repaints itself, like the live input loop.
+        rl.painter.handle_resize(40, 10);
+        let _ = rl.process_input_batch(&prompt, vec![Event::Key(ch('a'))]);
+        let after_first_paint = rl.painter.captured_for_test().len();
+
+        // The resize; the repaint it triggers is the resize frame.
+        let _ = rl.process_input_batch(&prompt, vec![Event::Resize(60, 10)]);
+
+        let frame = String::from_utf8_lossy(&rl.painter.captured_for_test()[after_first_paint..]);
+        assert!(
+            frame.matches("FIRST-LINE").count() == 0,
+            "the leading line is never re-emitted: {frame:?}"
+        );
+        assert!(frame.contains("second "), "the last prompt line is redrawn");
+        assert!(frame.contains('a'), "the buffer is redrawn");
     }
 
     #[test]
