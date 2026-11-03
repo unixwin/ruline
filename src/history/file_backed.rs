@@ -52,12 +52,17 @@ fn decode_entry(s: &str) -> String {
 }
 
 impl History for FileBackedHistory {
-    /// only saves a value if it's different than the last value
+    /// Saves the value exactly as given — a faithful store, like GNU
+    /// `add_history` (history.c:384), which records what it is handed.
+    /// Deduplication is *application* policy (bash `HISTCONTROL`), applied
+    /// by the host above this store, never silently inside it: dropping
+    /// consecutive duplicates here made faithful host policies
+    /// (`ignorespace` only, or erase-duplicates-later) impossible to
+    /// implement. A6-F11.
     fn save(&mut self, h: HistoryItem) -> Result<HistoryItem> {
         let entry = h.command_line;
-        // Don't append if the preceding value is identical or the string empty
-        let entry_id =
-            if (self.entries.back() != Some(&entry)) && !entry.is_empty() && self.capacity > 0 {
+        // Don't append if the string is empty
+        let entry_id = if !entry.is_empty() && self.capacity > 0 {
                 if self.entries.len() == self.capacity {
                     // History is "full", so we delete the oldest entry first,
                     // before adding a new one.
