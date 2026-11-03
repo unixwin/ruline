@@ -13609,3 +13609,234 @@ mod tests {
         assert_eq!(rl.editor.get_buffer(), "\"two words\"");
     }
 }
+
+// ================= A6 deep-audit probes (engine level) ========================
+#[cfg(test)]
+mod a6_probe {
+    use super::*;
+    use crate::{DefaultPrompt, Emacs, Prompt, Vi};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn engine(edit_mode: Box<dyn EditMode>) -> Reedline {
+        let mut rl = Reedline::create().with_edit_mode(edit_mode);
+        rl.painter.force_prompt_anchored_for_test(0);
+        rl
+    }
+    fn drive(rl: &mut Reedline, keys: &[KeyEvent]) {
+        let prompt = DefaultPrompt::default();
+        let events: Vec<Event> = keys.iter().copied().map(Event::Key).collect();
+        let _ = rl.process_input_batch(&prompt, events).expect("batch ok");
+    }
+    fn drive_signal(rl: &mut Reedline, keys: &[KeyEvent]) -> Option<Signal> {
+        let prompt = DefaultPrompt::default();
+        let events: Vec<Event> = keys.iter().copied().map(Event::Key).collect();
+        match rl.process_input_batch(&prompt, events).expect("batch ok") {
+            std::ops::ControlFlow::Break(s) => Some(s),
+            std::ops::ControlFlow::Continue(()) => None,
+        }
+    }
+    fn ch(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+    fn alt(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+    fn text(s: &str) -> Vec<KeyEvent> {
+        s.chars().map(ch).collect()
+    }
+    fn enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn e1_quoted_insert_types_literal_tab() {
+        let mut rl = engine(Box::<Emacs>::default());
+        let mut keys = text("echo ");
+        keys.push(ctrl('q'));
+        keys.push(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        drive(&mut rl, &keys);
+        assert_eq!(rl.editor.get_buffer(), "echo \t");
+    }
+
+    #[test]
+    #[ignore = "A6-F14: known divergence, see deep-audit A6 REPORT.md"]
+    fn e2_yank_last_arg_cycles_to_earlier_args() {
+        let mut rl = engine(Box::<Emacs>::default());
+        let mut keys = text("echo foo bar");
+        keys.push(enter());
+        let sig = drive_signal(&mut rl, &keys);
+        assert!(matches!(&sig, Some(Signal::Success(s)) if s == "echo foo bar"), "got {sig:?}");
+        drive(&mut rl, &[alt('.')]);
+        assert_eq!(rl.editor.get_buffer(), "bar");
+        drive(&mut rl, &[alt('.')]);
+        assert_eq!(rl.editor.get_buffer(), "foo", "repeat walks to earlier arg");
+    }
+
+    #[test]
+    fn e4_digit_argument_repeats_insert() {
+        let mut rl = engine(Box::<Emacs>::default());
+        drive(&mut rl, &[alt('1'), alt('2'), ch('x')]);
+        assert_eq!(rl.editor.get_buffer(), "xxxxxxxxxxxx");
+    }
+
+    #[test]
+    fn e6_ctrl_g_aborts_digit_argument() {
+        let mut rl = engine(Box::<Emacs>::default());
+        drive(&mut rl, &[alt('2'), ctrl('g'), ch('x')]);
+        assert_eq!(rl.editor.get_buffer(), "x");
+    }
+
+    #[test]
+    #[ignore = "A6-F16: known divergence, see deep-audit A6 REPORT.md"]
+    fn e5d_draft_then_up_in_separate_batches() {
+        let mut rl = engine(Box::<Emacs>::default());
+        let mut keys = text("old cmd");
+        keys.push(enter());
+        let _ = drive_signal(&mut rl, &keys);
+        rl.begin_read();
+        drive(&mut rl, &text("partial"));
+        drive(&mut rl, &[KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)]);
+        assert_eq!(rl.editor.get_buffer(), "old cmd");
+        drive(&mut rl, &[KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)]);
+        assert_eq!(rl.editor.get_buffer(), "partial");
+    }
+
+    #[test]
+    fn e5c_history_up_on_empty_line_after_submit() {
+        let mut rl = engine(Box::<Emacs>::default());
+        let mut keys = text("old cmd");
+        keys.push(enter());
+        let _ = drive_signal(&mut rl, &keys);
+        rl.begin_read();
+        drive(&mut rl, &[KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)]);
+        assert_eq!(rl.editor.get_buffer(), "old cmd");
+    }
+
+    #[test]
+    fn e7_vi_big_a_at_engine_level() {
+        // Per-key batches: mode transitions must settle between presses,
+        // as with real keystrokes (cf. the engine tests' `type_each`).
+        let mut rl = engine(Box::<Vi>::default());
+        let mut keys = text("ab cd");
+        keys.push(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        for k in &keys {
+            drive(&mut rl, &[*k]);
+        }
+        drive(&mut rl, &[ch('A')]);
+        drive(&mut rl, &[ch('X')]);
+        assert_eq!(rl.editor.get_buffer(), "ab cdX");
+    }
+}
+
+#[cfg(test)]
+mod a6_probe_vi_eol {
+    use super::*;
+    use crate::{DefaultPrompt, Prompt, Vi};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn engine() -> Reedline {
+        let mut rl = Reedline::create().with_edit_mode(Box::<Vi>::default());
+        rl.painter.force_prompt_anchored_for_test(0);
+        rl
+    }
+    fn drive1(rl: &mut Reedline, k: KeyEvent) {
+        let prompt = DefaultPrompt::default();
+        let _ = rl
+            .process_input_batch(&prompt, vec![Event::Key(k)])
+            .expect("batch ok");
+    }
+    fn ch(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+    fn shift(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
+    }
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+    fn type_str(rl: &mut Reedline, s: &str) {
+        for c in s.chars() {
+            drive1(rl, ch(c));
+        }
+    }
+    /// Type `line` in insert mode, Esc to normal (caret on last char),
+    /// then `h` `lefts` times.
+    fn setup(rl: &mut Reedline, line: &str, lefts: usize) {
+        type_str(rl, line);
+        drive1(rl, esc());
+        for _ in 0..lefts {
+            drive1(rl, ch('h'));
+        }
+    }
+
+    #[test]
+    fn e8_big_c_to_line_end_then_type() {
+        let mut rl = engine();
+        setup(&mut rl, "hello world", 4); // caret on 'w' (byte 6)
+        drive1(&mut rl, shift('C'));
+        type_str(&mut rl, "there");
+        assert_eq!(rl.editor.get_buffer(), "hello there");
+    }
+
+    #[test]
+    #[ignore = "A6-F17: known divergence, see deep-audit A6 REPORT.md"]
+    fn e9_cw_on_gap_span() {
+        // GNU rl_domove_motion_callback (vi_mode.c:1250-1272): the w
+        // target backs off to the gap, then the cw rule advances one
+        // char — the span is [3, 4), only the space is changed.
+        let mut rl = engine();
+        setup(&mut rl, "one two", 3); // caret on the space (byte 3)
+        drive1(&mut rl, ch('c'));
+        drive1(&mut rl, ch('w'));
+        type_str(&mut rl, "X");
+        assert_eq!(rl.editor.get_buffer(), "oneXtwo");
+    }
+
+    #[test]
+    fn e10_a_on_last_char_then_type() {
+        let mut rl = engine();
+        setup(&mut rl, "ab", 0); // caret on 'b'
+        drive1(&mut rl, ch('a'));
+        type_str(&mut rl, "X");
+        assert_eq!(rl.editor.get_buffer(), "abX");
+    }
+
+    #[test]
+    fn e11_cl_at_line_end_then_type() {
+        let mut rl = engine();
+        setup(&mut rl, "ab", 0); // caret on 'b'
+        drive1(&mut rl, ch('c'));
+        drive1(&mut rl, ch('l'));
+        type_str(&mut rl, "X");
+        assert_eq!(rl.editor.get_buffer(), "aX");
+    }
+
+    #[test]
+    #[ignore = "A6-F18: known divergence, see deep-audit A6 REPORT.md"]
+    fn e13_dot_repeat_replays_change_text_engine_level() {
+        let mut rl = engine();
+        type_str(&mut rl, "one two three");
+        drive1(&mut rl, esc()); // caret on last 'e'
+        drive1(&mut rl, ch('0'));
+        drive1(&mut rl, ch('c'));
+        drive1(&mut rl, ch('w'));
+        type_str(&mut rl, "X");
+        drive1(&mut rl, esc());
+        assert_eq!(rl.editor.get_buffer(), "X two three");
+        drive1(&mut rl, ch('w'));
+        drive1(&mut rl, ch('.'));
+        assert_eq!(rl.editor.get_buffer(), "X X three");
+    }
+
+    #[test]
+    fn e12_s_at_line_end_then_type() {
+        let mut rl = engine();
+        setup(&mut rl, "ab", 0); // caret on 'b'
+        drive1(&mut rl, ch('s'));
+        type_str(&mut rl, "X");
+        assert_eq!(rl.editor.get_buffer(), "aX");
+    }
+}

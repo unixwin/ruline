@@ -9,6 +9,9 @@ mod resolve;
 mod rest_policy;
 mod word;
 
+#[cfg(test)]
+mod a6_probe;
+
 #[cfg(feature = "system_clipboard")]
 pub(crate) use clip_buffer::get_system_clipboard;
 pub(crate) use clip_buffer::{Clipboard, LocalClipboard};
