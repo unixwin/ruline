@@ -94,7 +94,18 @@ pub static mut rl_prefer_env_winsize: c_int = 0;
 
 #[cfg(unix)]
 extern "C" {
+    // macOS (and the other Apple libcs) export the standard streams only
+    // under these names; `stdin`/`stdout` there are macros over them, not
+    // symbols. glibc and bionic export the plain names.
+    #[cfg_attr(
+        any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"),
+        link_name = "__stdinp"
+    )]
     static mut stdin: *mut libc::FILE;
+    #[cfg_attr(
+        any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"),
+        link_name = "__stdoutp"
+    )]
     static mut stdout: *mut libc::FILE;
 }
 
