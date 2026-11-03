@@ -523,6 +523,9 @@ impl Vi {
 }
 
 #[cfg(test)]
+mod a6_probe;
+
+#[cfg(test)]
 mod test {
     use super::*;
     use crate::{Direction, Granularity, MotionTarget, WordEdge, WordKind};

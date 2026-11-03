@@ -83,6 +83,11 @@ pub(crate) fn locate_word(
     edge: WordEdge,
     direction: Direction,
 ) -> usize {
+    // Every flavor below slices `buf` at `origin`. A caller holding a
+    // position from before a length-changing edit (e.g. a case
+    // conversion that shrank the buffer) must not panic the scan:
+    // resolve from the nearest valid boundary at or before it. A6-F04.
+    let origin = buf.floor_char_boundary(origin.min(buf.len()));
     let forward = direction == Direction::Forward;
 
     let is_boundary: fn(char, char) -> bool = match kind {

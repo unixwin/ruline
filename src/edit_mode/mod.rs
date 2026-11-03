@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod a6_probe;
 mod base;
 mod cursors;
 mod emacs;

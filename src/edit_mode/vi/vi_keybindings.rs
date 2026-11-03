@@ -96,5 +96,16 @@ pub fn default_vi_insert_keybindings() -> Keybindings {
         ReedlineEvent::Suspend,
     );
 
+    // GNU vi-insert binds C-u to `unix-line-discard` (kill.c
+    // `rl_unix_line_discard`: kill from point back to the start of the
+    // buffer). The common edit bindings carry no C-u, so without this the
+    // keypress self-inserts nothing and silently does nothing at all.
+    // A6-F09.
+    kb.add_binding(
+        KeyModifiers::CONTROL,
+        KeyCode::Char('u'),
+        edit_bind(EditCommand::CutFromStart),
+    );
+
     kb
 }

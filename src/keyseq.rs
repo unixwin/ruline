@@ -45,6 +45,10 @@ pub fn parse_readline_keyseq(seq: &str) -> Option<(KeyModifiers, KeyCode)> {
         // A bare ESC is one key on its own.
         "\\e" | "^[" => Some((KeyModifiers::NONE, KeyCode::Esc)),
         "^?" => Some((KeyModifiers::NONE, KeyCode::Backspace)),
+        // GNU single-letter escapes with a key representation
+        // (rl_translate_keyseq): \d is DEL (rubout), \t is TAB.
+        "\\d" => Some((KeyModifiers::NONE, KeyCode::Backspace)),
+        "\\t" => Some((KeyModifiers::NONE, KeyCode::Tab)),
         _ => parse_escape_prefixed(seq)
             .or_else(|| parse_control_or_meta(seq))
             .or_else(|| {
@@ -78,6 +82,15 @@ pub fn split_readline_units(seq: &str) -> Option<Vec<&str>> {
             let end = rest
                 .char_indices()
                 .skip(2)
+                .find(|(_, c)| c.is_ascii_alphabetic() || *c == '~')
+                .map(|(i, c)| i + c.len_utf8())?;
+            (&rest[..end], &rest[end..])
+        } else if rest.starts_with("^[[") {
+            // The caret spelling of a CSI sequence is one key, exactly
+            // like the `\e[` spelling above — not `^[` + `[` + a letter.
+            let end = rest
+                .char_indices()
+                .skip(3)
                 .find(|(_, c)| c.is_ascii_alphabetic() || *c == '~')
                 .map(|(i, c)| i + c.len_utf8())?;
             (&rest[..end], &rest[end..])
@@ -175,11 +188,34 @@ fn parse_escape_prefixed(seq: &str) -> Option<(KeyModifiers, KeyCode)> {
 }
 
 fn parse_control_or_meta(seq: &str) -> Option<(KeyModifiers, KeyCode)> {
+    // Combined prefixes: GNU accumulates modifiers, so `\C-\M-f` and
+    // `\M-\C-f` are the same single key with both modifiers set.
+    for (first, second) in [("\\C-", "\\M-"), ("\\M-", "\\C-")] {
+        if let Some(tail) = seq
+            .strip_prefix(first)
+            .and_then(|rest| rest.strip_prefix(second))
+        {
+            let mut chars = tail.chars();
+            let ch = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            return Some((
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char(ch.to_ascii_lowercase()),
+            ));
+        }
+    }
     if let Some(tail) = seq.strip_prefix("\\C-") {
         let mut chars = tail.chars();
         let ch = chars.next()?;
         if chars.next().is_some() {
             return None;
+        }
+        // `\C-?` is the DEL character (0x7f) itself, not a control combo:
+        // GNU spells rubout this way.
+        if ch == '?' {
+            return Some((KeyModifiers::NONE, KeyCode::Backspace));
         }
         return Some((
             KeyModifiers::CONTROL,
@@ -321,3 +357,6 @@ mod tests {
         assert_eq!(parse_readline_chord(""), None);
     }
 }
+
+#[cfg(test)]
+mod a6_probe;

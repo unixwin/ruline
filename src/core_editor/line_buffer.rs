@@ -583,20 +583,40 @@ impl LineBuffer {
         self.line_range_at(self.cursor.head())
     }
 
-    /// Uppercases the current word
+    /// Uppercases from the insertion point to the end of the word —
+    /// GNU `rl_upcase_word` (`rl_change_case`, text.c): the span starts
+    /// at point, not at the start of the word under point, and point
+    /// lands on the span's end. A6-F01.
     pub fn uppercase_word(&mut self) {
-        let change_range = self.current_word_range();
-        let uppercased = self.get_buffer()[change_range.clone()].to_uppercase();
-        self.replace_range(change_range, &uppercased);
-        self.set_head(self.word_boundary(WordKind::Unicode, WordEdge::End, Direction::Forward));
+        self.change_case_from_point(true);
     }
 
-    /// Lowercases the current word
+    /// Lowercases from the insertion point to the end of the word —
+    /// GNU `rl_downcase_word`; see [`uppercase_word`](Self::uppercase_word).
+    /// A6-F01.
     pub fn lowercase_word(&mut self) {
-        let change_range = self.current_word_range();
-        let uppercased = self.get_buffer()[change_range.clone()].to_lowercase();
-        self.replace_range(change_range, &uppercased);
-        self.set_head(self.word_boundary(WordKind::Unicode, WordEdge::End, Direction::Forward));
+        self.change_case_from_point(false);
+    }
+
+    /// Shared body of the case commands: convert `buffer[point..word-end]`
+    /// and land point at the end of the *converted* text. Measuring the
+    /// landing from the replacement (the way `capitalize_word` does)
+    /// matters because case conversion can change the byte length
+    /// (e.g. `ﬀ`.to_uppercase() == "FF"): recomputing a boundary on the
+    /// new buffer from the stale pre-replacement cursor panicked when
+    /// the conversion shrank the buffer. A6-F04.
+    fn change_case_from_point(&mut self, upper: bool) {
+        let start = self.insertion_point();
+        let end =
+            self.word_boundary_at(start, WordKind::Unicode, WordEdge::End, Direction::Forward);
+        let span = &self.get_buffer()[start..end];
+        let converted = if upper {
+            span.to_uppercase()
+        } else {
+            span.to_lowercase()
+        };
+        self.replace_range(start..end, &converted);
+        self.set_head(start + converted.len());
     }
 
     /// Capitalizes the word at point — GNU `rl_capitalize_word`
@@ -1454,11 +1474,15 @@ mod test {
     }
 
     #[rstest]
-    #[case("This is a test", 13, "This is a TEST", 14)]
+    // GNU `rl_change_case` starts at point: a point inside a word
+    // converts only from point to the word's end, and a point at the
+    // buffer end has an empty span and changes nothing (A6-F01; the
+    // same rule `capitalize_word_works` below already pins).
+    #[case("This is a test", 13, "This is a tesT", 14)]
     #[case("This is a test", 10, "This is a TEST", 14)]
     #[case("", 0, "", 0)]
     #[case("This", 0, "THIS", 4)]
-    #[case("This", 4, "THIS", 4)]
+    #[case("This", 4, "This", 4)]
     fn uppercase_word_works(
         #[case] input: &str,
         #[case] in_location: usize,
@@ -1506,11 +1530,12 @@ mod test {
     }
 
     #[rstest]
-    #[case("This is a TEST", 13, "This is a test", 14)]
+    // See `uppercase_word_works`: GNU spans start at point (A6-F01).
+    #[case("This is a TEST", 13, "This is a TESt", 14)]
     #[case("This is a TEST", 10, "This is a test", 14)]
     #[case("", 0, "", 0)]
     #[case("THIS", 0, "this", 4)]
-    #[case("THIS", 4, "this", 4)]
+    #[case("THIS", 4, "THIS", 4)]
     fn lowercase_word_works(
         #[case] input: &str,
         #[case] in_location: usize,
