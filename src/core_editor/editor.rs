@@ -32,6 +32,11 @@ pub struct Editor {
     system_clipboard: Box<dyn Clipboard>,
     edit_stack: EditStack<LineBuffer>,
     last_undo_behavior: UndoBehavior,
+    /// Chars in the currently open insert undo entry — the run-length
+    /// state GNU keeps in the `UNDO_INSERT` entry itself (`end - start`,
+    /// text.c:110) for its 20-char concatenation cap. Zero whenever the
+    /// last undo entry is not an insert run. A6-F03.
+    insert_undo_run: usize,
     edit_mode: PromptEditMode,
     /// Set when [`sync_edit_mode`](Self::sync_edit_mode) adopts a new rest
     /// policy without committing the cursor; cleared at the commit boundary.
@@ -103,6 +108,7 @@ impl Default for Editor {
             system_clipboard: get_system_clipboard(),
             edit_stack: EditStack::new(),
             last_undo_behavior: UndoBehavior::CreateUndoPoint,
+            insert_undo_run: 0,
             edit_mode: PromptEditMode::Default,
             policy_unsettled: false,
             cross_line_cursor: true,
@@ -1021,6 +1027,8 @@ impl Editor {
 
     pub(crate) fn reset_undo_stack(&mut self) {
         self.edit_stack.reset();
+        self.last_undo_behavior = UndoBehavior::CreateUndoPoint;
+        self.insert_undo_run = 0;
     }
 
     pub(crate) fn move_to_start(&mut self, select: bool) {
@@ -1083,12 +1091,42 @@ impl Editor {
     pub(crate) fn update_undo_state(&mut self, undo_behavior: UndoBehavior) {
         if matches!(undo_behavior, UndoBehavior::NoOp) {
             self.last_undo_behavior = UndoBehavior::NoOp;
+            self.insert_undo_run = 0;
             return;
         }
-        if !undo_behavior.create_undo_point_after(&self.last_undo_behavior) {
+        // GNU's insert cap (text.c:110): a single-char insert concatenates
+        // into the open UNDO_INSERT entry only while that entry holds
+        // fewer than 20 chars — at 20 the entry closes and this insert
+        // starts a fresh one, however the pairwise predicate votes.
+        let insert_cap_reached = matches!(undo_behavior, UndoBehavior::InsertCharacter(_))
+            && matches!(self.last_undo_behavior, UndoBehavior::InsertCharacter(_))
+            && self.insert_undo_run >= 20;
+        // A new undo point keeps the previous snapshot on the stack;
+        // grouping replaces it with the current buffer instead.
+        let create_point =
+            insert_cap_reached || undo_behavior.create_undo_point_after(&self.last_undo_behavior);
+        if !create_point {
             self.edit_stack.undo();
         }
         self.edit_stack.insert(self.line_buffer.clone());
+        // Maintain the open insert entry's length: an insert that grouped
+        // extends it, an insert that started a point opens a new entry of
+        // one char, and every other behavior closes the run. A cursor move
+        // closes it too — GNU additionally requires the insert to land
+        // exactly at the open entry's end (`rl_undo_list->end == rl_point`,
+        // text.c:109), which a bare move already breaks in practice.
+        self.insert_undo_run = match undo_behavior {
+            UndoBehavior::InsertCharacter(_) => {
+                if matches!(self.last_undo_behavior, UndoBehavior::InsertCharacter(_))
+                    && !insert_cap_reached
+                {
+                    self.insert_undo_run + 1
+                } else {
+                    1
+                }
+            }
+            _ => 0,
+        };
         self.last_undo_behavior = undo_behavior;
     }
 
@@ -3437,7 +3475,11 @@ mod test {
     }
 
     #[test]
-    fn test_undo_backspace_works_on_word_boundaries() {
+    fn test_undo_backspace_restores_one_char_per_press() {
+        // GNU (issue #32): every rubout is its own undo entry
+        // (rl_delete_text, text.c:125), so the six backspaces over
+        // "a test" undo one character at a time — the old pin grouped
+        // them at word boundaries, which is the A6-F03 divergence.
         let mut editor = editor_with("This is  a test");
         for _ in 0..6 {
             editor.run_edit_command(&EditCommand::Backspace);
@@ -3446,11 +3488,17 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "This is  a");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "This is  a ");
+        for _ in 0..4 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This is  a test");
     }
 
     #[test]
-    fn test_undo_delete_works_on_word_boundaries() {
+    fn test_undo_delete_restores_one_char_per_press() {
+        // GNU (issue #32): forward Delete is the same per-press undo
+        // shape as Backspace — seven presses, seven entries.
         let mut editor = editor_with("This  is a test");
         editor.line_buffer.set_insertion_point(0);
         for _ in 0..7 {
@@ -3460,24 +3508,31 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "is a test");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), " is a test");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This  is a test");
     }
 
     #[test]
-    fn test_undo_insert_with_newline() {
+    fn test_undo_insert_run_with_newline_is_one_chunk() {
+        // GNU (issue #32): rl_insert_text concatenates single-char
+        // inserts regardless of the characters (text.c:106-114) — a
+        // newline inside a typed run does not split the undo entry.
         let mut editor = editor_with("This is a");
         for cmd in str_to_edit_commands(" \n test") {
             editor.run_edit_command(&cmd);
         }
         assert_eq!(editor.get_buffer(), "This is a \n test");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "This is a \n");
-        editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "This is a");
     }
 
     #[test]
-    fn test_undo_backspace_with_newline() {
+    fn test_undo_backspace_with_newline_restores_per_press() {
+        // GNU (issue #32): eight backspaces are eight undo entries,
+        // newline included — no chunk forms around the `\n`.
         let mut editor = editor_with("This is a \n test");
         for _ in 0..8 {
             editor.run_edit_command(&EditCommand::Backspace);
@@ -3486,13 +3541,19 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "This is a");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "This is a \n");
+        assert_eq!(editor.get_buffer(), "This is a ");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "This is a \n");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This is a \n test");
     }
 
     #[test]
-    fn test_undo_backspace_with_crlf() {
+    fn test_undo_backspace_with_crlf_restores_per_press() {
+        // GNU (issue #32): per-press entries; the `\r\n` grapheme is
+        // one press, hence one entry, restored whole at its turn.
         let mut editor = editor_with("This is a \r\n test");
         for _ in 0..8 {
             editor.run_edit_command(&EditCommand::Backspace);
@@ -3501,8 +3562,12 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "This is a");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "This is a \r\n");
+        assert_eq!(editor.get_buffer(), "This is a ");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "This is a \r\n");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This is a \r\n test");
     }
 
@@ -3599,7 +3664,8 @@ mod test {
     }
 
     #[test]
-    fn test_undo_delete_with_newline() {
+    fn test_undo_delete_with_newline_restores_per_press() {
+        // GNU (issue #32): eight forward Deletes are eight entries.
         let mut editor = editor_with("This \n is a test");
         editor.line_buffer.set_insertion_point(0);
         for _ in 0..8 {
@@ -3609,15 +3675,20 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "is a test");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "\n is a test");
+        assert_eq!(editor.get_buffer(), " is a test");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "\n is a test");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This \n is a test");
     }
 
     #[test]
-    fn test_undo_delete_with_crlf() {
-        // CLRF delete is a special case, since the first character of the
-        // grapheme is \r rather than \n
+    fn test_undo_delete_with_crlf_restores_per_press() {
+        // CRLF delete is a special case, since the first character of the
+        // grapheme is \r rather than \n. GNU (issue #32): the grapheme
+        // is one press and one undo entry, like every other Delete.
         let mut editor = editor_with("This \r\n is a test");
         editor.line_buffer.set_insertion_point(0);
         for _ in 0..8 {
@@ -3627,8 +3698,12 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "is a test");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "\r\n is a test");
+        assert_eq!(editor.get_buffer(), " is a test");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "\r\n is a test");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This \r\n is a test");
     }
 

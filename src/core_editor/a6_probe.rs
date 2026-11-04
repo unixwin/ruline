@@ -237,7 +237,6 @@ fn c8_copy_region_does_not_break_kill_chain_but_moves_nothing() {
 // ---------- D. undo grouping ---------------------------------------------------
 
 #[test]
-#[ignore = "A6-F03: known divergence, see deep-audit A6 REPORT.md"]
 fn d1_undo_once_reverts_whole_typed_run() {
     // GNU oracle-verified: typing "abc def" then ONE undo empties the run
     let mut e = ed("", 0);
@@ -522,7 +521,6 @@ fn c9_yank_pop_after_motion_dings() {
 }
 
 #[test]
-#[ignore = "A6-F03: known divergence, see deep-audit A6 REPORT.md"]
 fn d5_backspace_undo_restores_one_char_per_gnu() {
     // GNU: rl_delete_text makes one undo entry per rubout (no coalescing);
     // inserts coalesce, deletes do not.
@@ -535,11 +533,14 @@ fn d5_backspace_undo_restores_one_char_per_gnu() {
     }
     assert_eq!(state(&e).0, "abc");
     run(&mut e, &[EditCommand::Undo]);
-    assert_eq!(state(&e).0, "abcd", "GNU restores exactly one rubbed-out char");
+    assert_eq!(
+        state(&e).0,
+        "abcd",
+        "GNU restores exactly one rubbed-out char"
+    );
 }
 
 #[test]
-#[ignore = "A6-F03: known divergence, see deep-audit A6 REPORT.md"]
 fn d6_insert_run_chunks_at_twenty() {
     // GNU rl_insert_text concatenates single-char inserts into one undo
     // entry only while that entry is shorter than 20 chars (text.c:107).
@@ -551,6 +552,56 @@ fn d6_insert_run_chunks_at_twenty() {
     assert_eq!(state(&e).0, "abcdefghijklmnopqrst", "newest 5-char chunk undone");
     run(&mut e, &[EditCommand::Undo]);
     assert_eq!(state(&e).0, "", "then the 20-char chunk");
+}
+
+#[test]
+fn issue32_forward_delete_undo_restores_one_char() {
+    // The Delete key is the same GNU rubout shape as Backspace:
+    // rl_delete_text adds one undo entry per press (text.c:125), so
+    // one Undo after two Deletes restores exactly one character.
+    let mut e = ed("abcdef", 0);
+    for _ in 0..2 {
+        e.run_edit_command(&EditCommand::Delete);
+    }
+    assert_eq!(state(&e).0, "cdef");
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(
+        state(&e).0,
+        "bcdef",
+        "GNU restores exactly one deleted char"
+    );
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(state(&e).0, "abcdef");
+}
+
+#[test]
+fn issue32_insert_run_of_exactly_twenty_is_one_chunk() {
+    // The cap is "while the entry is shorter than 20" (text.c:110):
+    // 20 typed chars are a single entry; the 21st opens a new one.
+    let mut e = ed("", 0);
+    for c in "abcdefghijklmnopqrst".chars() {
+        e.run_edit_command(&EditCommand::InsertChar(c));
+    }
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(state(&e).0, "", "20 chars undo as one chunk");
+}
+
+#[test]
+fn issue32_alternating_insert_and_backspace_never_merge() {
+    // An insert after a rubout starts its own entry even though the
+    // previous *insert* is still on the stack: GNU concatenates only
+    // into the newest entry, and the newest is the delete.
+    let mut e = ed("", 0);
+    for c in "ab".chars() {
+        e.run_edit_command(&EditCommand::InsertChar(c));
+    }
+    run(&mut e, &[EditCommand::Backspace]);
+    run(&mut e, &[EditCommand::InsertChar('x')]);
+    assert_eq!(state(&e).0, "ax");
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(state(&e).0, "a", "the x insert is its own undo entry");
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(state(&e).0, "ab", "then the rubout entry");
 }
 
 #[test]
