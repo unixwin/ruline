@@ -204,6 +204,14 @@ pub enum WordKind {
     /// characters flanking a `'` or a `.` rather than on their class, thus it
     /// stays a separate scan instead of collapsing onto a boundary predicate.
     Unicode,
+    /// GNU readline's word flavor for its named emacs commands (`M-f`/`M-b`,
+    /// `M-d`, `M-u`/`M-l`/`M-c`, `M-t`): a word is a maximal run of
+    /// *alphanumeric* characters — `_rl_walphabetic` (lib/readline/
+    /// rlmbutil.h:216, `ISALNUM` in chardefs.h:103) — and everything else,
+    /// `_` and punctuation included, is separator. Like [`Unicode`](Self::Unicode)
+    /// it is a separate scan in `locate_word`, because separators form no
+    /// words of their own (a class-transition resolver would stop on them).
+    Alphabetic,
 }
 
 /// Which edge of a word a motion lands on.

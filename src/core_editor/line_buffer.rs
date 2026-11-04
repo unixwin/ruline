@@ -607,8 +607,12 @@ impl LineBuffer {
     /// the conversion shrank the buffer. A6-F04.
     fn change_case_from_point(&mut self, upper: bool) {
         let start = self.insertion_point();
-        let end =
-            self.word_boundary_at(start, WordKind::Unicode, WordEdge::End, Direction::Forward);
+        let end = self.word_boundary_at(
+            start,
+            WordKind::Alphabetic,
+            WordEdge::End,
+            Direction::Forward,
+        );
         let span = &self.get_buffer()[start..end];
         let converted = if upper {
             span.to_uppercase()
@@ -627,8 +631,12 @@ impl LineBuffer {
     /// and point does not move (GNU's empty `start == end` span).
     pub fn capitalize_word(&mut self) {
         let start = self.insertion_point();
-        let end =
-            self.word_boundary_at(start, WordKind::Unicode, WordEdge::End, Direction::Forward);
+        let end = self.word_boundary_at(
+            start,
+            WordKind::Alphabetic,
+            WordEdge::End,
+            Direction::Forward,
+        );
         let mut in_word = false;
         let mut changed = String::with_capacity(end.saturating_sub(start));
         for c in self.get_buffer()[start..end].chars() {
@@ -717,13 +725,13 @@ impl LineBuffer {
     /// the kill-ring path (`unix-word-rubout`, `backward-kill-word`) can
     /// capture the killed text before clearing it.
     pub(crate) fn word_left_index(&self) -> usize {
-        self.word_boundary(WordKind::Unicode, WordEdge::Start, Direction::Backward)
+        self.word_boundary(WordKind::Alphabetic, WordEdge::Start, Direction::Backward)
     }
 
     /// Deletes one word to the left
     pub fn delete_word_left(&mut self) {
         let left_word_index =
-            self.word_boundary(WordKind::Unicode, WordEdge::Start, Direction::Backward);
+            self.word_boundary(WordKind::Alphabetic, WordEdge::Start, Direction::Backward);
         self.clear_range(left_word_index..self.insertion_point());
         self.set_head(left_word_index);
     }
@@ -815,7 +823,7 @@ impl LineBuffer {
     /// Deletes one word to the right
     pub fn delete_word_right(&mut self) {
         let right_word_index =
-            self.word_boundary(WordKind::Unicode, WordEdge::End, Direction::Forward);
+            self.word_boundary(WordKind::Alphabetic, WordEdge::End, Direction::Forward);
         self.clear_range(self.insertion_point()..right_word_index);
     }
 
@@ -831,24 +839,28 @@ impl LineBuffer {
         let orig_point = self.insertion_point();
         let w2_end = self.word_boundary_at(
             orig_point,
-            WordKind::Unicode,
+            WordKind::Alphabetic,
             WordEdge::End,
             Direction::Forward,
         );
         let w2_beg = self.word_boundary_at(
             w2_end,
-            WordKind::Unicode,
+            WordKind::Alphabetic,
             WordEdge::Start,
             Direction::Backward,
         );
         let w1_beg = self.word_boundary_at(
             w2_beg,
-            WordKind::Unicode,
+            WordKind::Alphabetic,
             WordEdge::Start,
             Direction::Backward,
         );
-        let w1_end =
-            self.word_boundary_at(w1_beg, WordKind::Unicode, WordEdge::End, Direction::Forward);
+        let w1_end = self.word_boundary_at(
+            w1_beg,
+            WordKind::Alphabetic,
+            WordEdge::End,
+            Direction::Forward,
+        );
 
         // GNU's two-word check (text.c:1616): no second word, or the
         // spans overlap.

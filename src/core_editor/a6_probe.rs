@@ -71,7 +71,6 @@ fn a6_capitalize_at_word_start() {
 }
 
 #[test]
-#[ignore = "A6-F02: known divergence, see deep-audit A6 REPORT.md"]
 fn a7_upcase_stops_at_punctuation() {
     // GNU word chars are alnum: M-u inside "foo" of "foo.bar" ends at '.'
     let mut e = ed("foo.bar", 1);
@@ -105,7 +104,6 @@ fn b1_transpose_words_point_in_first() {
 }
 
 #[test]
-#[ignore = "A6-F02: known divergence, see deep-audit A6 REPORT.md"]
 fn b2_transpose_words_punctuation_is_separator() {
     // GNU oracle-verified shape: "echo [one two", point in "one" ->
     // "one [echo two" (punctuation skipped as separator, not a word)
@@ -429,7 +427,6 @@ fn m1_forward_word_lands_on_word_end() {
 }
 
 #[test]
-#[ignore = "A6-F02: known divergence, see deep-audit A6 REPORT.md"]
 fn m2_kill_word_spans_stop_at_punctuation() {
     // GNU kill-word on "foo.bar" at 0 kills "foo" only (alnum word chars)
     let mut e = ed("foo.bar", 0);
@@ -463,12 +460,41 @@ fn m4_transpose_words_at_start_of_first_word_noop() {
 }
 
 #[test]
-#[ignore = "A6-F02: known divergence, see deep-audit A6 REPORT.md"]
 fn m5_upcase_word_point_on_punctuation() {
     // GNU: point on '.', M-u upcases the FOLLOWING word
     let mut e = ed("foo.bar", 3);
     run(&mut e, &[EditCommand::UppercaseWord]);
     assert_eq!(state(&e), ("foo.BAR".into(), 7));
+}
+
+#[test]
+fn issue31_kill_and_move_words_treat_underscore_as_separator() {
+    // GNU word chars are ISALNUM only (chardefs.h:103): in "foo_bar",
+    // M-d from 0 kills "foo" and leaves "_bar"; M-b from the end lands
+    // on the start of "bar" (byte 4), not of "foo_bar".
+    let mut e = ed("foo_bar", 0);
+    run(&mut e, &[EditCommand::CutWordRight]);
+    assert_eq!(state(&e).0, "_bar");
+    assert_eq!(e.current_kill().0, "foo");
+
+    let mut e = ed("foo_bar", 7);
+    run(&mut e, &[EditCommand::MoveWordLeft { select: false }]);
+    assert_eq!(state(&e).1, 4);
+    // M-f from inside "foo" completes "foo" only, landing on the '_'.
+    let mut e = ed("foo_bar", 1);
+    run(&mut e, &[EditCommand::MoveWordRight { select: false }]);
+    assert_eq!(state(&e).1, 3);
+}
+
+#[test]
+fn issue31_backward_kill_word_skips_punctuation_run() {
+    // M-Backspace (backward-kill-word) after "foo...": GNU kills the
+    // word "foo", consuming the separator run as part of the span —
+    // the span is point back to the start of the previous alnum word.
+    let mut e = ed("foo...", 6);
+    run(&mut e, &[EditCommand::CutWordLeft]);
+    assert_eq!(state(&e).0, "");
+    assert_eq!(e.current_kill().0, "foo...");
 }
 
 #[test]
