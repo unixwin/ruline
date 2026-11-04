@@ -3247,6 +3247,18 @@ impl Reedline {
                 self.input_mode = InputMode::Regular;
                 Ok(EventStatus::Handled)
             }
+            // GNU's isearch dispatch (isearch.c:513-524): a base-keymap
+            // command that is not `rl_insert` terminates the search and
+            // is then executed as the pending command. `C-x C-r`
+            // (re-read-init-file) is such a command, so it leaves search
+            // mode and counts as handled — the caller runs the event
+            // again in regular mode, where it performs the re-read.
+            // Dropping it as Inapplicable stranded the chord (and the
+            // whole `UntilFound` keymap arm) inside the search.
+            ReedlineEvent::ReReadInitFile => {
+                self.input_mode = InputMode::Regular;
+                Ok(EventStatus::Handled)
+            }
             // TODO: Check if events should be handled
             ReedlineEvent::Right
             | ReedlineEvent::Left
@@ -3273,7 +3285,6 @@ impl Reedline {
             | ReedlineEvent::None
             | ReedlineEvent::HistoryHintWordComplete
             | ReedlineEvent::OpenEditor
-            | ReedlineEvent::ReReadInitFile
             | ReedlineEvent::Menu(_)
             | ReedlineEvent::MenuAccept
             | ReedlineEvent::MenuNext
@@ -13273,6 +13284,25 @@ mod tests {
         assert_eq!(rl.editor.get_buffer(), "echo");
     }
 
+    /// `C-x C-r` (re-read-init-file) inside an incremental search:
+    /// GNU's isearch dispatch terminates the search for any base-keymap
+    /// command and executes it as the pending command (isearch.c:513-524),
+    /// so the event leaves search mode as Handled instead of being
+    /// dropped as Inapplicable.
+    #[test]
+    fn issue45_re_read_init_file_terminates_history_search() {
+        let mut rl = seam_engine(Box::<Emacs>::default());
+        seed_history(&mut rl, &["echo one"]);
+        drive(&mut rl, &[ctrl('r')]);
+        assert_eq!(rl.input_mode, InputMode::HistorySearch);
+
+        let status = rl
+            .handle_history_search_event(ReedlineEvent::ReReadInitFile)
+            .unwrap();
+        assert_eq!(status, EventStatus::Handled);
+        assert_eq!(rl.input_mode, InputMode::Regular);
+    }
+
     /// `C-g` also aborts a NON-incremental search (`_rl_nsearch_abort`,
     /// search.c:270): the saved line and point come back. T2 F3.
     #[test]
@@ -13674,7 +13704,12 @@ mod a6_probe {
     }
 
     #[test]
-    #[ignore = "A6-F14: known divergence, see deep-audit A6 REPORT.md"]
+    #[ignore = "premise refuted 2026-11-04 (Wave A ruline lane): GNU rl_yank_last_arg \
+                repeats walk older history ENTRIES, not earlier args of the same entry \
+                (kill.c:649-695; PTY probe: second M-. dings and erases the yank). \
+                The expectation below is zsh semantics; kept ignored pending captain \
+                adjudication of the pin itself — the walk-entries behavior is pinned \
+                by yank_last_arg_repeat_walks_older_entries"]
     fn e2_yank_last_arg_cycles_to_earlier_args() {
         let mut rl = engine(Box::<Emacs>::default());
         let mut keys = text("echo foo bar");
@@ -13794,7 +13829,6 @@ mod a6_probe_vi_eol {
     }
 
     #[test]
-    #[ignore = "A6-F17: known divergence, see deep-audit A6 REPORT.md"]
     fn e9_cw_on_gap_span() {
         // GNU rl_domove_motion_callback (vi_mode.c:1250-1272): the w
         // target backs off to the gap, then the cw rule advances one
@@ -13827,7 +13861,6 @@ mod a6_probe_vi_eol {
     }
 
     #[test]
-    #[ignore = "A6-F18: known divergence, see deep-audit A6 REPORT.md"]
     fn e13_dot_repeat_replays_change_text_engine_level() {
         let mut rl = engine();
         type_str(&mut rl, "one two three");

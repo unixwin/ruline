@@ -56,6 +56,14 @@ pub struct Vi {
     last_char_search: Option<MotionTarget>,
     // half-typed explicit multi-key binding
     resolver: SequenceResolver,
+    // Text typed during the current command-opened insert session,
+    // captured so `.` can replay it with the command (GNU keeps the
+    // insert text next to the command: `_rl_vi_last_insert`). `None`
+    // outside such a session.
+    insert_capture: Option<String>,
+    // An `R` (replace) session turned overstrike on and owns turning
+    // it back off when the session ends.
+    replace_session: bool,
 }
 
 impl Default for Vi {
@@ -91,6 +99,8 @@ impl Vi {
             previous: None,
             last_char_search: None,
             resolver: SequenceResolver::new(),
+            insert_capture: None,
+            replace_session: false,
         }
     }
 
@@ -109,7 +119,11 @@ impl EditMode for Vi {
         match event.into() {
             Event::Key(KeyEvent {
                 code, modifiers, ..
-            }) => self.dispatch_key(modifiers, code),
+            }) => {
+                let event = self.dispatch_key(modifiers, code);
+                self.observe_insert_capture(&event);
+                event
+            }
             event => parse_non_key_event(event),
         }
     }
@@ -151,7 +165,9 @@ impl EditMode for Vi {
         if pending.is_empty() {
             return ReedlineEvent::None;
         }
-        combine_events(self.flush_keys(&pending))
+        let event = combine_events(self.flush_keys(&pending));
+        self.observe_insert_capture(&event);
+        event
     }
 }
 
@@ -384,7 +400,7 @@ impl Vi {
                         self.cache.clear();
                         ReedlineEvent::None
                     } else if res.is_complete(self.mode) {
-                        let event = res.to_reedline_event(self);
+                        let mut event = res.to_reedline_event(self);
                         let previous_mode = self.mode;
                         let mode_changed = match res.changes_mode(previous_mode) {
                             Some(mode) => {
@@ -394,6 +410,24 @@ impl Vi {
                             None => false,
                         };
                         self.cache.clear();
+                        if mode_changed && self.mode == ViMode::Insert {
+                            // A command sequence just opened an insert
+                            // session: capture what gets typed, so `.`
+                            // replays the text with the command (GNU
+                            // keeps it as `_rl_vi_last_insert`).
+                            self.insert_capture = Some(String::new());
+                            if self.replace_session && !res.is_replace_entry() {
+                                // Overstrike left on by an `R` action
+                                // replayed through `.` (a replay opens
+                                // no session to leave): clear it before
+                                // this plain session starts typing.
+                                self.replace_session = false;
+                                event = ReedlineEvent::Multiple(vec![
+                                    ReedlineEvent::OverwriteMode(Some(false)),
+                                    event,
+                                ]);
+                            }
+                        }
                         // A mode change must repaint even when the edit is a
                         // no-op (e.g. `a` at line end), mirroring helix's
                         // `Multiple([event, Repaint])` on a mode switch.
@@ -470,12 +504,74 @@ impl Vi {
         self.mode = ViMode::Normal;
         let mut events = vec![ReedlineEvent::Esc];
         if leaving_insert {
+            self.finish_insert_capture();
+            if self.replace_session {
+                // The `R` session ends: overstrike goes back off.
+                self.replace_session = false;
+                events.push(ReedlineEvent::OverwriteMode(Some(false)));
+            }
             events.push(ReedlineEvent::Edit(vec![EditCommand::Move(
                 MotionTarget::Grapheme(Direction::Backward),
             )]));
         }
         events.push(ReedlineEvent::Repaint);
         events
+    }
+
+    /// Watch a dispatched event for text typed into a captured insert
+    /// session: self-inserts accumulate, and a rubout removes the last
+    /// captured char (GNU folds the session's rubouts the same way for
+    /// the common shapes). Everything else — cursor moves, history
+    /// recalls, `Ctrl-W` — is outside the capture; see the report note
+    /// on the replay boundary.
+    fn observe_insert_capture(&mut self, event: &ReedlineEvent) {
+        if self.insert_capture.is_none() || self.mode != ViMode::Insert {
+            return;
+        }
+        match event {
+            ReedlineEvent::Multiple(events) | ReedlineEvent::UntilFound(events) => {
+                for event in events {
+                    self.observe_insert_capture(event);
+                }
+            }
+            ReedlineEvent::Edit(commands) => {
+                let capture = self.insert_capture.as_mut().expect("checked above");
+                for command in commands {
+                    match command {
+                        EditCommand::InsertChar(c) => capture.push(*c),
+                        EditCommand::InsertString(s) => capture.push_str(s),
+                        EditCommand::Backspace => {
+                            capture.pop();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Fold the text typed during the insert session that just ended
+    /// into the recorded previous action, so `.` replays the command
+    /// *and* its insert (GNU `rl_vi_redo` re-inserts
+    /// `_rl_vi_last_insert` after the command). An empty session
+    /// (`cw` straight to Esc) leaves the recorded action untouched.
+    fn finish_insert_capture(&mut self) {
+        let Some(text) = self.insert_capture.take() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let insert = ReedlineEvent::Edit(vec![EditCommand::InsertString(text)]);
+        self.previous = Some(match self.previous.take() {
+            Some(ReedlineEvent::Multiple(mut events)) => {
+                events.push(insert);
+                ReedlineEvent::Multiple(events)
+            }
+            Some(single) => ReedlineEvent::Multiple(vec![single, insert]),
+            None => insert,
+        });
     }
 
     /// `Alt-<char>` as `Esc` then `<char>`, the meta convention of readline

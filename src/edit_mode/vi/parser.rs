@@ -95,9 +95,16 @@ impl ParsedViSequence {
         }
     }
 
+    /// Whether this sequence is the `R` (replace-mode) entry, whose
+    /// overstrike the session owns.
+    pub fn is_replace_entry(&self) -> bool {
+        matches!(self.command, Some(Command::EnterViReplace))
+    }
+
     pub fn changes_mode(&self, mode: ViMode) -> Option<ViMode> {
         match (&self.command, &self.motion) {
             (Some(Command::EnterViInsert), ParseResult::Incomplete)
+            | (Some(Command::EnterViReplace), ParseResult::Incomplete)
             | (Some(Command::EnterViAppend), ParseResult::Incomplete)
             | (Some(Command::ChangeToLineEnd), ParseResult::Incomplete)
             | (Some(Command::AppendToEnd), ParseResult::Incomplete)
@@ -672,8 +679,8 @@ mod tests {
         ReedlineEvent::Edit(vec![EditCommand::Change { target: MotionTarget::LineEdge(Direction::Forward), granularity: Granularity::LineWise }]),
         ReedlineEvent::Repaint,
     ]))]
-    #[case(&['c', 'w'], ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Cut { target: word(WordKind::Word, WordEdge::End, Direction::Forward), granularity: Granularity::CharWise }]), ReedlineEvent::Repaint]))]
-    #[case(&['c', 'W'], ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Cut { target: word(WordKind::LongWord, WordEdge::End, Direction::Forward), granularity: Granularity::CharWise }]), ReedlineEvent::Repaint]))]
+    #[case(&['c', 'w'], ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::CutViChangeWord { kind: WordKind::Word }]), ReedlineEvent::Repaint]))]
+    #[case(&['c', 'W'], ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::CutViChangeWord { kind: WordKind::LongWord }]), ReedlineEvent::Repaint]))]
     #[case(&['c', 'e'], ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Cut { target: word(WordKind::Word, WordEdge::End, Direction::Forward), granularity: Granularity::CharWise }]), ReedlineEvent::Repaint]))]
     #[case(&['c', 'b'], ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Cut { target: word(WordKind::Word, WordEdge::Start, Direction::Backward), granularity: Granularity::CharWise }]), ReedlineEvent::Repaint]))]
     #[case(&['c', 'B'], ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Cut { target: word(WordKind::LongWord, WordEdge::Start, Direction::Backward), granularity: Granularity::CharWise }]), ReedlineEvent::Repaint]))]
@@ -777,14 +784,25 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&['c', 'w'], &['c', 'e'])]
-    #[case(&['c', 'W'], &['c', 'E'])]
-    fn test_reedline_move_synonm(#[case] synonym: &[char], #[case] original: &[char]) {
+    #[case(&['c', 'w'], WordKind::Word)]
+    #[case(&['c', 'W'], WordKind::LongWord)]
+    fn test_cw_lowers_to_the_domove_change_word_command(
+        #[case] input: &[char],
+        #[case] kind: WordKind,
+    ) {
+        // `cw`≡`ce` holds only on a word character; on whitespace GNU's
+        // domove cleanup collapses the span to the gap (vi_mode.c:1250-1272),
+        // so `cw`/`cW` lower to the buffer-aware `CutViChangeWord` while
+        // `ce`/`cE` keep the plain word-end `Cut` (A6-F17).
         let mut vi = Vi::default();
-        let output = vi_parse(synonym).to_reedline_event(&mut vi);
-        let expected = vi_parse(original).to_reedline_event(&mut vi);
-
-        assert_eq!(output, expected);
+        let output = vi_parse(input).to_reedline_event(&mut vi);
+        assert_eq!(
+            output,
+            ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![EditCommand::CutViChangeWord { kind }]),
+                ReedlineEvent::Repaint,
+            ])
+        );
     }
 
     #[rstest]

@@ -655,6 +655,19 @@ pub enum EditCommand {
     /// Cut the WORD right of the insertion point and any following space
     CutBigWordRightToNext,
 
+    /// Cut the span GNU's vi `cw`/`cW` computes for a forward word motion
+    /// (`_rl_vi_domove_motion_cleanup`, vi_mode.c:1250-1272): the `w`
+    /// landing backs off one char, then the `cw` rule advances one char
+    /// from the mark — on a word character the two moves compose to the
+    /// word-end span (the `cw`≡`ce` rule), but on whitespace they cancel
+    /// onto the mark and the advance leaves a one-grapheme span, so only
+    /// the gap is changed. The plain word-end target cannot express the
+    /// whitespace case, so the vi change lowering carries its own command.
+    CutViChangeWord {
+        /// The word flavor of the motion (`w` vs `W`)
+        kind: WordKind,
+    },
+
     /// Paste the cut buffer in front of the insertion point (Emacs, vi `P`)
     PasteCutBufferBefore,
 
@@ -1035,6 +1048,7 @@ impl EditCommand {
             | EditCommand::CutBigWordRight
             | EditCommand::CutWordRightToNext
             | EditCommand::CutBigWordRightToNext
+            | EditCommand::CutViChangeWord { .. }
             | EditCommand::PasteCutBufferBefore
             | EditCommand::PasteCutBufferAfter
             | EditCommand::Yank
@@ -1147,6 +1161,7 @@ impl EditCommand {
             | EditCommand::CutBigWordRight
             | EditCommand::CutWordRightToNext
             | EditCommand::CutBigWordRightToNext
+            | EditCommand::CutViChangeWord { .. }
             | EditCommand::CutRightUntil(_)
             | EditCommand::CutRightBefore(_)
             | EditCommand::CutLeftUntil(_)
