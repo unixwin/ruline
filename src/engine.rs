@@ -3273,6 +3273,7 @@ impl Reedline {
             | ReedlineEvent::None
             | ReedlineEvent::HistoryHintWordComplete
             | ReedlineEvent::OpenEditor
+            | ReedlineEvent::ReReadInitFile
             | ReedlineEvent::Menu(_)
             | ReedlineEvent::MenuAccept
             | ReedlineEvent::MenuNext
@@ -3959,6 +3960,17 @@ impl Reedline {
                 Ok(status.into())
             }
             ReedlineEvent::OpenEditor => self.open_editor().map(|_| EventStatus::Handled),
+            ReedlineEvent::ReReadInitFile => {
+                // GNU `rl_re_read_init_file` re-applies the init file's
+                // bindings to the live session. The engine holds no init
+                // file — bindings arrive via the host-supplied edit mode —
+                // so the re-application is the host's part, driven by this
+                // event where a host observes the event stream. The stock
+                // engine acknowledges the chord (Handled, with the repaint
+                // that follows any handled event), matching GNU's silent
+                // success; the buffer and point are untouched. A6-F10.
+                Ok(EventStatus::Handled)
+            }
             ReedlineEvent::Resize(width, height) => {
                 self.last_render_snapshot = None;
                 self.painter.handle_resize(width, height);

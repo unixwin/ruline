@@ -320,9 +320,9 @@ fn word_boundary_at_origin(
         WordKind::Word => word::is_word_boundary(a, b),
         WordKind::LongWord => word::is_long_word_boundary(a, b),
         // The hop mirrors helix's `reached_target`, which is defined
-        // for the char-class kinds; `Unicode` takes the default
-        // anchor rule and is never produced by the helix machine.
-        WordKind::Unicode => return false,
+        // for the char-class kinds; `Unicode` and `Alphabetic` take the
+        // default anchor rule and are never produced by the helix machine.
+        WordKind::Unicode | WordKind::Alphabetic => return false,
     };
 
     // Mirrors Helix's `reached_target`: a *start* must land on the word grapheme;

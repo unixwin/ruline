@@ -32,6 +32,11 @@ pub struct Editor {
     system_clipboard: Box<dyn Clipboard>,
     edit_stack: EditStack<LineBuffer>,
     last_undo_behavior: UndoBehavior,
+    /// Chars in the currently open insert undo entry — the run-length
+    /// state GNU keeps in the `UNDO_INSERT` entry itself (`end - start`,
+    /// text.c:110) for its 20-char concatenation cap. Zero whenever the
+    /// last undo entry is not an insert run. A6-F03.
+    insert_undo_run: usize,
     edit_mode: PromptEditMode,
     /// Set when [`sync_edit_mode`](Self::sync_edit_mode) adopts a new rest
     /// policy without committing the cursor; cleared at the commit boundary.
@@ -82,9 +87,10 @@ enum OperatorVerb {
 }
 
 /// Build a word [`MotionTarget`] — the shared shape the legacy `*Word*` command
-/// sugar lowers to. The emacs-flavored bindings pass [`WordKind::Unicode`]
-/// (UAX-29, proven equivalent to the old `*_index` scans); the big-WORD sugar
-/// passes [`WordKind::LongWord`].
+/// sugar lowers to. The emacs-flavored bindings pass [`WordKind::Alphabetic`]
+/// (GNU readline's alphanumeric word set, A6-F02); the big-WORD sugar
+/// passes [`WordKind::LongWord`]. [`WordKind::Unicode`] remains for the
+/// MotionTarget/helix-flavored paths that ask for it by name.
 fn word_target(kind: WordKind, edge: WordEdge, direction: Direction) -> MotionTarget {
     MotionTarget::Word {
         kind,
@@ -102,6 +108,7 @@ impl Default for Editor {
             system_clipboard: get_system_clipboard(),
             edit_stack: EditStack::new(),
             last_undo_behavior: UndoBehavior::CreateUndoPoint,
+            insert_undo_run: 0,
             edit_mode: PromptEditMode::Default,
             policy_unsettled: false,
             cross_line_cursor: true,
@@ -1020,6 +1027,8 @@ impl Editor {
 
     pub(crate) fn reset_undo_stack(&mut self) {
         self.edit_stack.reset();
+        self.last_undo_behavior = UndoBehavior::CreateUndoPoint;
+        self.insert_undo_run = 0;
     }
 
     pub(crate) fn move_to_start(&mut self, select: bool) {
@@ -1082,12 +1091,42 @@ impl Editor {
     pub(crate) fn update_undo_state(&mut self, undo_behavior: UndoBehavior) {
         if matches!(undo_behavior, UndoBehavior::NoOp) {
             self.last_undo_behavior = UndoBehavior::NoOp;
+            self.insert_undo_run = 0;
             return;
         }
-        if !undo_behavior.create_undo_point_after(&self.last_undo_behavior) {
+        // GNU's insert cap (text.c:110): a single-char insert concatenates
+        // into the open UNDO_INSERT entry only while that entry holds
+        // fewer than 20 chars — at 20 the entry closes and this insert
+        // starts a fresh one, however the pairwise predicate votes.
+        let insert_cap_reached = matches!(undo_behavior, UndoBehavior::InsertCharacter(_))
+            && matches!(self.last_undo_behavior, UndoBehavior::InsertCharacter(_))
+            && self.insert_undo_run >= 20;
+        // A new undo point keeps the previous snapshot on the stack;
+        // grouping replaces it with the current buffer instead.
+        let create_point =
+            insert_cap_reached || undo_behavior.create_undo_point_after(&self.last_undo_behavior);
+        if !create_point {
             self.edit_stack.undo();
         }
         self.edit_stack.insert(self.line_buffer.clone());
+        // Maintain the open insert entry's length: an insert that grouped
+        // extends it, an insert that started a point opens a new entry of
+        // one char, and every other behavior closes the run. A cursor move
+        // closes it too — GNU additionally requires the insert to land
+        // exactly at the open entry's end (`rl_undo_list->end == rl_point`,
+        // text.c:109), which a bare move already breaks in practice.
+        self.insert_undo_run = match undo_behavior {
+            UndoBehavior::InsertCharacter(_) => {
+                if matches!(self.last_undo_behavior, UndoBehavior::InsertCharacter(_))
+                    && !insert_cap_reached
+                {
+                    self.insert_undo_run + 1
+                } else {
+                    1
+                }
+            }
+            _ => 0,
+        };
         self.last_undo_behavior = undo_behavior;
     }
 
@@ -1211,7 +1250,7 @@ impl Editor {
 
     fn cut_word_left(&mut self) {
         self.apply_operator(
-            word_target(WordKind::Unicode, WordEdge::Start, Direction::Backward),
+            word_target(WordKind::Alphabetic, WordEdge::Start, Direction::Backward),
             OperatorVerb::Cut,
         );
     }
@@ -1228,7 +1267,7 @@ impl Editor {
         // Under a bar caret the operator span runs `origin..trailing`, matching
         // the old `insertion_point..word_right_index`.
         self.apply_operator(
-            word_target(WordKind::Unicode, WordEdge::End, Direction::Forward),
+            word_target(WordKind::Alphabetic, WordEdge::End, Direction::Forward),
             OperatorVerb::Cut,
         );
     }
@@ -1242,7 +1281,7 @@ impl Editor {
 
     fn cut_word_right_to_next(&mut self) {
         self.apply_operator(
-            word_target(WordKind::Unicode, WordEdge::Start, Direction::Forward),
+            word_target(WordKind::Alphabetic, WordEdge::Start, Direction::Forward),
             OperatorVerb::Cut,
         );
     }
@@ -1595,7 +1634,7 @@ impl Editor {
 
     fn move_word_left(&mut self, select: bool) {
         self.apply_move(
-            word_target(WordKind::Unicode, WordEdge::Start, Direction::Backward),
+            word_target(WordKind::Alphabetic, WordEdge::Start, Direction::Backward),
             select,
         );
     }
@@ -1610,14 +1649,14 @@ impl Editor {
     fn move_word_right(&mut self, select: bool) {
         // emacs M-f: end of current word, no skip.
         self.apply_move(
-            word_target(WordKind::Unicode, WordEdge::End, Direction::Forward),
+            word_target(WordKind::Alphabetic, WordEdge::End, Direction::Forward),
             select,
         );
     }
 
     fn move_word_right_start(&mut self, select: bool) {
         self.apply_move(
-            word_target(WordKind::Unicode, WordEdge::Start, Direction::Forward),
+            word_target(WordKind::Alphabetic, WordEdge::Start, Direction::Forward),
             select,
         );
     }
@@ -2209,7 +2248,7 @@ impl Editor {
 
     pub(crate) fn copy_word_left(&mut self) {
         self.apply_operator(
-            word_target(WordKind::Unicode, WordEdge::Start, Direction::Backward),
+            word_target(WordKind::Alphabetic, WordEdge::Start, Direction::Backward),
             OperatorVerb::Copy,
         );
     }
@@ -2224,7 +2263,7 @@ impl Editor {
     pub(crate) fn copy_word_right(&mut self) {
         // emacs forward-word end (no skip) — mirrors `cut_word_right`.
         self.apply_operator(
-            word_target(WordKind::Unicode, WordEdge::End, Direction::Forward),
+            word_target(WordKind::Alphabetic, WordEdge::End, Direction::Forward),
             OperatorVerb::Copy,
         );
     }
@@ -2238,7 +2277,7 @@ impl Editor {
 
     pub(crate) fn copy_word_right_to_next(&mut self) {
         self.apply_operator(
-            word_target(WordKind::Unicode, WordEdge::Start, Direction::Forward),
+            word_target(WordKind::Alphabetic, WordEdge::Start, Direction::Forward),
             OperatorVerb::Copy,
         );
     }
@@ -3179,7 +3218,10 @@ mod test {
     #[rstest]
     #[case("abc def ghi", 11, "abc def ")]
     #[case("abc def-ghi", 11, "abc def-")]
-    #[case("abc def.ghi", 11, "abc ")]
+    // GNU flavor (issue #31): '.' is a separator, so backward-kill-word
+    // from the end removes only "ghi" — the old expectation ("abc ")
+    // treated "def.ghi" as one word span.
+    #[case("abc def.ghi", 11, "abc def.")]
     fn test_cut_word_left(#[case] input: &str, #[case] position: usize, #[case] expected: &str) {
         let mut editor = editor_with(input);
         editor.line_buffer.set_insertion_point(position);
@@ -3433,7 +3475,11 @@ mod test {
     }
 
     #[test]
-    fn test_undo_backspace_works_on_word_boundaries() {
+    fn test_undo_backspace_restores_one_char_per_press() {
+        // GNU (issue #32): every rubout is its own undo entry
+        // (rl_delete_text, text.c:125), so the six backspaces over
+        // "a test" undo one character at a time — the old pin grouped
+        // them at word boundaries, which is the A6-F03 divergence.
         let mut editor = editor_with("This is  a test");
         for _ in 0..6 {
             editor.run_edit_command(&EditCommand::Backspace);
@@ -3442,11 +3488,17 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "This is  a");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "This is  a ");
+        for _ in 0..4 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This is  a test");
     }
 
     #[test]
-    fn test_undo_delete_works_on_word_boundaries() {
+    fn test_undo_delete_restores_one_char_per_press() {
+        // GNU (issue #32): forward Delete is the same per-press undo
+        // shape as Backspace — seven presses, seven entries.
         let mut editor = editor_with("This  is a test");
         editor.line_buffer.set_insertion_point(0);
         for _ in 0..7 {
@@ -3456,24 +3508,31 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "is a test");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), " is a test");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This  is a test");
     }
 
     #[test]
-    fn test_undo_insert_with_newline() {
+    fn test_undo_insert_run_with_newline_is_one_chunk() {
+        // GNU (issue #32): rl_insert_text concatenates single-char
+        // inserts regardless of the characters (text.c:106-114) — a
+        // newline inside a typed run does not split the undo entry.
         let mut editor = editor_with("This is a");
         for cmd in str_to_edit_commands(" \n test") {
             editor.run_edit_command(&cmd);
         }
         assert_eq!(editor.get_buffer(), "This is a \n test");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "This is a \n");
-        editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "This is a");
     }
 
     #[test]
-    fn test_undo_backspace_with_newline() {
+    fn test_undo_backspace_with_newline_restores_per_press() {
+        // GNU (issue #32): eight backspaces are eight undo entries,
+        // newline included — no chunk forms around the `\n`.
         let mut editor = editor_with("This is a \n test");
         for _ in 0..8 {
             editor.run_edit_command(&EditCommand::Backspace);
@@ -3482,13 +3541,19 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "This is a");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "This is a \n");
+        assert_eq!(editor.get_buffer(), "This is a ");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "This is a \n");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This is a \n test");
     }
 
     #[test]
-    fn test_undo_backspace_with_crlf() {
+    fn test_undo_backspace_with_crlf_restores_per_press() {
+        // GNU (issue #32): per-press entries; the `\r\n` grapheme is
+        // one press, hence one entry, restored whole at its turn.
         let mut editor = editor_with("This is a \r\n test");
         for _ in 0..8 {
             editor.run_edit_command(&EditCommand::Backspace);
@@ -3497,8 +3562,12 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "This is a");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "This is a \r\n");
+        assert_eq!(editor.get_buffer(), "This is a ");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "This is a \r\n");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This is a \r\n test");
     }
 
@@ -3595,7 +3664,8 @@ mod test {
     }
 
     #[test]
-    fn test_undo_delete_with_newline() {
+    fn test_undo_delete_with_newline_restores_per_press() {
+        // GNU (issue #32): eight forward Deletes are eight entries.
         let mut editor = editor_with("This \n is a test");
         editor.line_buffer.set_insertion_point(0);
         for _ in 0..8 {
@@ -3605,15 +3675,20 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "is a test");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "\n is a test");
+        assert_eq!(editor.get_buffer(), " is a test");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "\n is a test");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This \n is a test");
     }
 
     #[test]
-    fn test_undo_delete_with_crlf() {
-        // CLRF delete is a special case, since the first character of the
-        // grapheme is \r rather than \n
+    fn test_undo_delete_with_crlf_restores_per_press() {
+        // CRLF delete is a special case, since the first character of the
+        // grapheme is \r rather than \n. GNU (issue #32): the grapheme
+        // is one press and one undo entry, like every other Delete.
         let mut editor = editor_with("This \r\n is a test");
         editor.line_buffer.set_insertion_point(0);
         for _ in 0..8 {
@@ -3623,8 +3698,12 @@ mod test {
         editor.run_edit_command(&EditCommand::Undo);
         assert_eq!(editor.get_buffer(), "is a test");
         editor.run_edit_command(&EditCommand::Undo);
-        assert_eq!(editor.get_buffer(), "\r\n is a test");
+        assert_eq!(editor.get_buffer(), " is a test");
         editor.run_edit_command(&EditCommand::Undo);
+        assert_eq!(editor.get_buffer(), "\r\n is a test");
+        for _ in 0..5 {
+            editor.run_edit_command(&EditCommand::Undo);
+        }
         assert_eq!(editor.get_buffer(), "This \r\n is a test");
     }
 
@@ -6014,24 +6093,26 @@ mod test {
 
     // --- emacs word-command lowering (legacy `*Word*` sugar) -------------
     //
-    // The `MoveWord*`/`CutWord*`/`CopyWord*` commands now lower onto the
-    // `MotionTarget` verb path with `WordKind::Unicode`. These pin the two
-    // properties that lowering could silently break: the emacs `M-f` "rest
-    // after the word" fork, and that emacs words stay UAX-29 (contractions /
-    // punctuation kept whole) rather than drifting to the vi class-word rule.
+    // The `MoveWord*`/`CutWord*`/`CopyWord*` commands lower onto the
+    // `MotionTarget` verb path. Since issue #31 the GNU-named commands use
+    // `WordKind::Alphabetic` (GNU readline's word definition: alphanumeric
+    // runs, punctuation is separator), while the vi-`e` entry
+    // (`MoveWordRightEnd`) keeps `WordKind::Unicode` and the big-word
+    // commands keep `WordKind::LongWord`. These pin the properties that
+    // lowering could silently break: the emacs `M-f` "rest after the word"
+    // fork, and that each command's flavor stays the one its spec names.
 
     /// Differential guard: every word command must, at *every* cursor position,
-    /// produce exactly what the legacy `LineBuffer::*_index` spec produces. The
-    /// `*_index` methods are still present (deleted only in a later step), so
-    /// this compares the live command against the pre-migration definition
-    /// across a sweep of positions — catching the position-dependent skips that
-    /// the hand-picked single-position tests above missed.
+    /// produce exactly what `locate_word` with the command's flavor produces.
+    /// This compares the live command against the flavor definition across a
+    /// sweep of positions — catching the position-dependent skips that the
+    /// hand-picked single-position tests above missed.
     #[test]
-    fn word_commands_match_legacy_spec_at_every_position() {
+    fn word_commands_match_flavor_spec_at_every_position() {
         let buffers = [
             "foo bar baz",
-            "foo.bar baz",    // punctuation kept whole by UAX-29
-            "can't stop now", // contraction
+            "foo.bar baz",    // punctuation is a separator under the GNU flavor
+            "can't stop now", // contraction: two GNU words
             "café résumé",    // multibyte graphemes
             "  lead trail  ", // leading / trailing whitespace
             "a",
@@ -6075,17 +6156,17 @@ mod test {
                 #[allow(clippy::type_complexity)]
                 let moves: &[(EditCommand, fn(&LineBuffer) -> usize)] = &[
                     (EditCommand::MoveWordLeft { select: false }, |lb| {
-                        wb(lb, WordKind::Unicode, WordEdge::Start, false, false)
+                        wb(lb, WordKind::Alphabetic, WordEdge::Start, false, false)
                     }),
                     (EditCommand::MoveBigWordLeft { select: false }, |lb| {
                         wb(lb, WordKind::LongWord, WordEdge::Start, false, false)
                     }),
                     // bar caret: forward word-end rests on the trailing boundary
                     (EditCommand::MoveWordRight { select: false }, |lb| {
-                        wb(lb, WordKind::Unicode, WordEdge::End, true, false)
+                        wb(lb, WordKind::Alphabetic, WordEdge::End, true, false)
                     }),
                     (EditCommand::MoveWordRightStart { select: false }, |lb| {
-                        wb(lb, WordKind::Unicode, WordEdge::Start, true, false)
+                        wb(lb, WordKind::Alphabetic, WordEdge::Start, true, false)
                     }),
                     (EditCommand::MoveBigWordRightStart { select: false }, |lb| {
                         wb(lb, WordKind::LongWord, WordEdge::Start, true, false)
@@ -6124,7 +6205,12 @@ mod test {
                     (
                         EditCommand::CutWordLeft,
                         EditCommand::CopyWordLeft,
-                        |lb, ip| (wb(lb, WordKind::Unicode, WordEdge::Start, false, false), ip),
+                        |lb, ip| {
+                            (
+                                wb(lb, WordKind::Alphabetic, WordEdge::Start, false, false),
+                                ip,
+                            )
+                        },
                     ),
                     (
                         EditCommand::CutBigWordLeft,
@@ -6139,7 +6225,7 @@ mod test {
                     (
                         EditCommand::CutWordRight,
                         EditCommand::CopyWordRight,
-                        |lb, ip| (ip, wb(lb, WordKind::Unicode, WordEdge::End, true, false)),
+                        |lb, ip| (ip, wb(lb, WordKind::Alphabetic, WordEdge::End, true, false)),
                     ),
                     (
                         EditCommand::CutBigWordRight,
@@ -6149,7 +6235,12 @@ mod test {
                     (
                         EditCommand::CutWordRightToNext,
                         EditCommand::CopyWordRightToNext,
-                        |lb, ip| (ip, wb(lb, WordKind::Unicode, WordEdge::Start, true, false)),
+                        |lb, ip| {
+                            (
+                                ip,
+                                wb(lb, WordKind::Alphabetic, WordEdge::Start, true, false),
+                            )
+                        },
                     ),
                     (
                         EditCommand::CutBigWordRightToNext,
@@ -6197,24 +6288,30 @@ mod test {
     }
 
     #[test]
-    fn move_word_right_keeps_contraction_whole() {
-        // UAX-29 keeps "can't" one word, so `M-f` skips past the apostrophe to
-        // byte 5; a vi class-word would have stopped on the `'` at byte 3.
+    fn move_word_right_stops_at_apostrophe_like_gnu() {
+        // GNU word flavor (issue #31): the apostrophe is a separator
+        // (chardefs.h:103, ISALNUM), so "can't" is two words to `M-f` —
+        // it lands after "can" (byte 3), and a second `M-f` completes
+        // the "t" (byte 5). The old UAX-29 pin kept the contraction
+        // whole and expected 5 in one step; that was the divergence
+        // A6-F02 documents.
         let mut editor = editor_with("can't stop");
         editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::MoveWordRight { select: false });
+        assert_eq!(editor.insertion_point(), 3);
         editor.run_edit_command(&EditCommand::MoveWordRight { select: false });
         assert_eq!(editor.insertion_point(), 5);
     }
 
     #[test]
-    fn cut_word_right_consumes_whole_contraction() {
-        // emacs `M-d` over "can't" removes the whole contraction (bytes 0..5),
-        // leaving " stop" — a class-word `dw` would cut only "can" (0..3).
+    fn cut_word_right_stops_at_apostrophe_like_gnu() {
+        // GNU `M-d` on "can't stop" from 0 kills only "can" (bytes
+        // 0..3): the apostrophe ends the word (issue #31).
         let mut editor = editor_with("can't stop");
         editor.move_to_position(0, false);
         editor.run_edit_command(&EditCommand::CutWordRight);
-        assert_eq!(editor.get_buffer(), " stop");
-        assert_eq!(editor.cut_buffer.get().0, "can't");
+        assert_eq!(editor.get_buffer(), "'t stop");
+        assert_eq!(editor.cut_buffer.get().0, "can");
     }
 
     #[test]

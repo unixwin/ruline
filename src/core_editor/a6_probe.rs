@@ -71,7 +71,6 @@ fn a6_capitalize_at_word_start() {
 }
 
 #[test]
-#[ignore = "A6-F02: known divergence, see deep-audit A6 REPORT.md"]
 fn a7_upcase_stops_at_punctuation() {
     // GNU word chars are alnum: M-u inside "foo" of "foo.bar" ends at '.'
     let mut e = ed("foo.bar", 1);
@@ -105,7 +104,6 @@ fn b1_transpose_words_point_in_first() {
 }
 
 #[test]
-#[ignore = "A6-F02: known divergence, see deep-audit A6 REPORT.md"]
 fn b2_transpose_words_punctuation_is_separator() {
     // GNU oracle-verified shape: "echo [one two", point in "one" ->
     // "one [echo two" (punctuation skipped as separator, not a word)
@@ -239,7 +237,6 @@ fn c8_copy_region_does_not_break_kill_chain_but_moves_nothing() {
 // ---------- D. undo grouping ---------------------------------------------------
 
 #[test]
-#[ignore = "A6-F03: known divergence, see deep-audit A6 REPORT.md"]
 fn d1_undo_once_reverts_whole_typed_run() {
     // GNU oracle-verified: typing "abc def" then ONE undo empties the run
     let mut e = ed("", 0);
@@ -429,7 +426,6 @@ fn m1_forward_word_lands_on_word_end() {
 }
 
 #[test]
-#[ignore = "A6-F02: known divergence, see deep-audit A6 REPORT.md"]
 fn m2_kill_word_spans_stop_at_punctuation() {
     // GNU kill-word on "foo.bar" at 0 kills "foo" only (alnum word chars)
     let mut e = ed("foo.bar", 0);
@@ -463,12 +459,41 @@ fn m4_transpose_words_at_start_of_first_word_noop() {
 }
 
 #[test]
-#[ignore = "A6-F02: known divergence, see deep-audit A6 REPORT.md"]
 fn m5_upcase_word_point_on_punctuation() {
     // GNU: point on '.', M-u upcases the FOLLOWING word
     let mut e = ed("foo.bar", 3);
     run(&mut e, &[EditCommand::UppercaseWord]);
     assert_eq!(state(&e), ("foo.BAR".into(), 7));
+}
+
+#[test]
+fn issue31_kill_and_move_words_treat_underscore_as_separator() {
+    // GNU word chars are ISALNUM only (chardefs.h:103): in "foo_bar",
+    // M-d from 0 kills "foo" and leaves "_bar"; M-b from the end lands
+    // on the start of "bar" (byte 4), not of "foo_bar".
+    let mut e = ed("foo_bar", 0);
+    run(&mut e, &[EditCommand::CutWordRight]);
+    assert_eq!(state(&e).0, "_bar");
+    assert_eq!(e.current_kill().0, "foo");
+
+    let mut e = ed("foo_bar", 7);
+    run(&mut e, &[EditCommand::MoveWordLeft { select: false }]);
+    assert_eq!(state(&e).1, 4);
+    // M-f from inside "foo" completes "foo" only, landing on the '_'.
+    let mut e = ed("foo_bar", 1);
+    run(&mut e, &[EditCommand::MoveWordRight { select: false }]);
+    assert_eq!(state(&e).1, 3);
+}
+
+#[test]
+fn issue31_backward_kill_word_skips_punctuation_run() {
+    // M-Backspace (backward-kill-word) after "foo...": GNU kills the
+    // word "foo", consuming the separator run as part of the span —
+    // the span is point back to the start of the previous alnum word.
+    let mut e = ed("foo...", 6);
+    run(&mut e, &[EditCommand::CutWordLeft]);
+    assert_eq!(state(&e).0, "");
+    assert_eq!(e.current_kill().0, "foo...");
 }
 
 #[test]
@@ -496,7 +521,6 @@ fn c9_yank_pop_after_motion_dings() {
 }
 
 #[test]
-#[ignore = "A6-F03: known divergence, see deep-audit A6 REPORT.md"]
 fn d5_backspace_undo_restores_one_char_per_gnu() {
     // GNU: rl_delete_text makes one undo entry per rubout (no coalescing);
     // inserts coalesce, deletes do not.
@@ -509,11 +533,14 @@ fn d5_backspace_undo_restores_one_char_per_gnu() {
     }
     assert_eq!(state(&e).0, "abc");
     run(&mut e, &[EditCommand::Undo]);
-    assert_eq!(state(&e).0, "abcd", "GNU restores exactly one rubbed-out char");
+    assert_eq!(
+        state(&e).0,
+        "abcd",
+        "GNU restores exactly one rubbed-out char"
+    );
 }
 
 #[test]
-#[ignore = "A6-F03: known divergence, see deep-audit A6 REPORT.md"]
 fn d6_insert_run_chunks_at_twenty() {
     // GNU rl_insert_text concatenates single-char inserts into one undo
     // entry only while that entry is shorter than 20 chars (text.c:107).
@@ -525,6 +552,56 @@ fn d6_insert_run_chunks_at_twenty() {
     assert_eq!(state(&e).0, "abcdefghijklmnopqrst", "newest 5-char chunk undone");
     run(&mut e, &[EditCommand::Undo]);
     assert_eq!(state(&e).0, "", "then the 20-char chunk");
+}
+
+#[test]
+fn issue32_forward_delete_undo_restores_one_char() {
+    // The Delete key is the same GNU rubout shape as Backspace:
+    // rl_delete_text adds one undo entry per press (text.c:125), so
+    // one Undo after two Deletes restores exactly one character.
+    let mut e = ed("abcdef", 0);
+    for _ in 0..2 {
+        e.run_edit_command(&EditCommand::Delete);
+    }
+    assert_eq!(state(&e).0, "cdef");
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(
+        state(&e).0,
+        "bcdef",
+        "GNU restores exactly one deleted char"
+    );
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(state(&e).0, "abcdef");
+}
+
+#[test]
+fn issue32_insert_run_of_exactly_twenty_is_one_chunk() {
+    // The cap is "while the entry is shorter than 20" (text.c:110):
+    // 20 typed chars are a single entry; the 21st opens a new one.
+    let mut e = ed("", 0);
+    for c in "abcdefghijklmnopqrst".chars() {
+        e.run_edit_command(&EditCommand::InsertChar(c));
+    }
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(state(&e).0, "", "20 chars undo as one chunk");
+}
+
+#[test]
+fn issue32_alternating_insert_and_backspace_never_merge() {
+    // An insert after a rubout starts its own entry even though the
+    // previous *insert* is still on the stack: GNU concatenates only
+    // into the newest entry, and the newest is the delete.
+    let mut e = ed("", 0);
+    for c in "ab".chars() {
+        e.run_edit_command(&EditCommand::InsertChar(c));
+    }
+    run(&mut e, &[EditCommand::Backspace]);
+    run(&mut e, &[EditCommand::InsertChar('x')]);
+    assert_eq!(state(&e).0, "ax");
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(state(&e).0, "a", "the x insert is its own undo entry");
+    run(&mut e, &[EditCommand::Undo]);
+    assert_eq!(state(&e).0, "ab", "then the rubout entry");
 }
 
 #[test]

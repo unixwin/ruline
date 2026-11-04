@@ -260,13 +260,18 @@ mod tests {
     }
 
     #[test]
-    fn appends_only_unique() -> Result<()> {
+    fn appends_keep_consecutive_duplicates() -> Result<()> {
+        // Renamed from `appends_only_unique`: the store is faithful
+        // (issue #38) — GNU `add_history` (lib/readline/history.c:384)
+        // stores what it is given, and duplicate policy is the host's
+        // (bash HISTCONTROL), not the store's. Two consecutive saves of
+        // the same line are two entries.
         let (mut hist, _) = create_history();
         hist.save(HistoryItem::from_command_line("unique_old"))?;
         hist.save(HistoryItem::from_command_line("test"))?;
         hist.save(HistoryItem::from_command_line("test"))?;
         hist.save(HistoryItem::from_command_line("unique"))?;
-        assert_eq!(hist.count_all()?, 3);
+        assert_eq!(hist.count_all()?, 4);
         Ok(())
     }
 

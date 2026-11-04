@@ -11,11 +11,16 @@
 //! Modes pick a flavor; the resolver (`locate_word`) scans with the matching
 //! predicate. Keeping the classifier here — mode-agnostic and tested in isolation
 //! — means vi-word, vi-WORD, emacs-word, and helix-word are thin variations over
-//! one definition rather than eight ad-hoc functions.
+//! one definition rather than eight ad-hoc functions. Two flavors don't fit the
+//! classifier and keep their own scans below: `Unicode` (UAX-29 segmentation)
+//! and `Alphabetic` (GNU readline's alphanumeric runs, whose separators form
+//! no words of their own).
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::core_editor::graphemes::{ensure_grapheme_boundary_prev, next_grapheme_boundary};
+use crate::core_editor::graphemes::{
+    ensure_grapheme_boundary_next, ensure_grapheme_boundary_prev, next_grapheme_boundary,
+};
 use crate::core_editor::line_buffer::is_whitespace_str;
 use crate::enums::{Direction, WordEdge, WordKind};
 
@@ -93,9 +98,13 @@ pub(crate) fn locate_word(
     let is_boundary: fn(char, char) -> bool = match kind {
         WordKind::Word => is_word_boundary,
         WordKind::LongWord => is_long_word_boundary,
-        // `Unicode` (emacs) is the one flavor not expressible as a char-class
-        // boundary predicate — it uses UAX-29 segmentation, with its own scan.
+        // `Unicode` (emacs) is not expressible as a char-class boundary
+        // predicate — it uses UAX-29 segmentation, with its own scan.
         WordKind::Unicode => return locate_unicode_word(buf, origin, edge, direction),
+        // Neither is `Alphabetic` (GNU): its separators (punctuation, `_`)
+        // are non-word *and* form no words of their own, so a transition
+        // resolver would wrongly stop on them. Its own scan below.
+        WordKind::Alphabetic => return locate_alphabetic_word(buf, origin, edge, direction),
     };
 
     // Is `ch` (with neighbors `before`/`after`, `None` at the buffer edges) the
@@ -200,6 +209,67 @@ fn locate_unicode_word(buf: &str, origin: usize, edge: WordEdge, direction: Dire
     }
 }
 
+/// `Alphabetic` (GNU readline) word location: a word is a maximal run of
+/// alphanumeric characters (`_rl_walphabetic`, lib/readline/rlmbutil.h:216 —
+/// `ISALNUM`, chardefs.h:103; the multibyte build's `iswalnum`, which
+/// `char::is_alphanumeric` mirrors). Everything else — whitespace, line
+/// endings, punctuation, `_` — is separator and forms no word, which is the
+/// whole behavioral content of `rl_forward_word` / `rl_backward_word`
+/// (text.c:488 / text.c:540): skip separators, then consume the run.
+///
+/// Landings are *bar* boundaries over the run set, mirroring the class
+/// flavors' geometry: `(Forward, End)` is the end of the first run ending
+/// after `origin` (GNU `M-f`), `(Backward, Start)` the start of the last
+/// run starting before `origin` (GNU `M-b`); `(Forward, Start)` and
+/// `(Backward, End)` are the symmetric next-start / previous-end for the
+/// consumers that ask for them. Start landings floor onto a grapheme
+/// boundary and end landings snap forward, like [`locate_word`]'s scans.
+fn locate_alphabetic_word(buf: &str, origin: usize, edge: WordEdge, direction: Direction) -> usize {
+    // Maximal alphanumeric runs as (start, end) byte ranges.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut run_start: Option<usize> = None;
+    for (byte, ch) in buf.char_indices() {
+        if ch.is_alphanumeric() {
+            if run_start.is_none() {
+                run_start = Some(byte);
+            }
+        } else if let Some(start) = run_start.take() {
+            runs.push((start, byte));
+        }
+    }
+    if let Some(start) = run_start {
+        runs.push((start, buf.len()));
+    }
+
+    let forward = direction == Direction::Forward;
+    match (forward, edge) {
+        (true, WordEdge::End) => runs
+            .iter()
+            .map(|&(_, end)| end)
+            .find(|&end| end > origin)
+            .map_or(buf.len(), |end| ensure_grapheme_boundary_next(buf, end)),
+        (true, WordEdge::Start) => runs
+            .iter()
+            .map(|&(start, _)| start)
+            .find(|&start| start > origin)
+            .map_or(buf.len(), |start| ensure_grapheme_boundary_prev(buf, start)),
+        (false, WordEdge::Start) => runs
+            .iter()
+            .map(|&(start, _)| start)
+            .rfind(|&start| start < origin)
+            .map_or(0, |start| ensure_grapheme_boundary_prev(buf, start)),
+        // The previous run's end: the last run that ends at or before
+        // `origin` without containing it (a run `origin` sits inside is
+        // the *current* word, not the previous one).
+        (false, WordEdge::End) => runs
+            .iter()
+            .filter(|&&(start, end)| end <= origin && start < origin)
+            .map(|&(_, end)| end)
+            .next_back()
+            .map_or(0, |end| ensure_grapheme_boundary_next(buf, end)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +327,139 @@ mod tests {
         assert!(is_word_boundary(' ', '\n')); // Whitespace → Eol
         assert!(!is_word_boundary('a', 'b')); // both Word
         assert!(!is_word_boundary('.', ',')); // both Punctuation
+    }
+
+    #[test]
+    fn issue31_alphabetic_forward_end_stops_at_punctuation() {
+        // GNU `M-f` on "foo.bar" from 0 ends after "foo" (text.c:488):
+        // '.' is a separator, and separators form no word to stop on.
+        assert_eq!(
+            locate_word(
+                "foo.bar",
+                0,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
+            3
+        );
+        // From the '.' itself, `M-f` skips it and finishes "bar".
+        assert_eq!(
+            locate_word(
+                "foo.bar",
+                3,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
+            7
+        );
+        // Mid-word, `M-f` completes the current run only.
+        assert_eq!(
+            locate_word(
+                "foo.bar",
+                1,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn issue31_alphabetic_underscore_is_a_separator() {
+        // `_` is not alphabetic in GNU (chardefs.h:103 ISALNUM), unlike
+        // the class flavors where it joins the word: "foo_bar" is two
+        // GNU words.
+        assert_eq!(
+            locate_word(
+                "foo_bar",
+                0,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
+            3
+        );
+        assert_eq!(
+            locate_word(
+                "foo_bar",
+                7,
+                WordKind::Alphabetic,
+                WordEdge::Start,
+                Direction::Backward
+            ),
+            4
+        );
+    }
+
+    #[test]
+    fn issue31_alphabetic_backward_start_and_next_start() {
+        // GNU `M-b` from the end of "foo.bar" lands on "bar"'s start;
+        // inside "bar" it lands on that same start; at "bar"'s start it
+        // retreats to "foo"'s start (text.c:540).
+        for (origin, want) in [(7, 4), (6, 4), (4, 0), (3, 0), (0, 0)] {
+            assert_eq!(
+                locate_word(
+                    "foo.bar",
+                    origin,
+                    WordKind::Alphabetic,
+                    WordEdge::Start,
+                    Direction::Backward
+                ),
+                want,
+                "M-b from {origin}"
+            );
+        }
+        // Next word start skips separator runs wholesale.
+        assert_eq!(
+            locate_word(
+                "foo... bar",
+                0,
+                WordKind::Alphabetic,
+                WordEdge::Start,
+                Direction::Forward
+            ),
+            7
+        );
+        // No word ahead: the buffer end; no word behind: 0.
+        assert_eq!(
+            locate_word(
+                "foo ",
+                4,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
+            4
+        );
+        assert_eq!(
+            locate_word(
+                " foo",
+                0,
+                WordKind::Alphabetic,
+                WordEdge::Start,
+                Direction::Backward
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn issue31_alphabetic_digits_join_letters() {
+        // ISALNUM covers digits: "abc123" is one GNU word, and a leading
+        // digit run is a word of its own ("123abc" capitalizes as one).
+        assert_eq!(
+            locate_word(
+                "abc123 x",
+                0,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
+            6
+        );
     }
 
     #[test]

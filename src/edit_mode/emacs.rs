@@ -394,6 +394,9 @@ impl Emacs {
             // launch). Without this arm OpenEditor is unreachable from
             // the default emacs table.
             (KeyModifiers::CONTROL, KeyCode::Char('e')) => ReedlineEvent::OpenEditor,
+            // `C-x C-r` — GNU `re-read-init-file`
+            // (emacs_keymap.c:616, `rl_re_read_init_file`).
+            (KeyModifiers::CONTROL, KeyCode::Char('r')) => ReedlineEvent::ReReadInitFile,
             (KeyModifiers::CONTROL, KeyCode::Char('u')) => edit_bind(EditCommand::Undo),
             // `C-x C-g` — GNU `abort` (the ctlx keymap's own C-g slot).
             (KeyModifiers::CONTROL, KeyCode::Char('g')) => ReedlineEvent::Esc,

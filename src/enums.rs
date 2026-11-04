@@ -204,6 +204,14 @@ pub enum WordKind {
     /// characters flanking a `'` or a `.` rather than on their class, thus it
     /// stays a separate scan instead of collapsing onto a boundary predicate.
     Unicode,
+    /// GNU readline's word flavor for its named emacs commands (`M-f`/`M-b`,
+    /// `M-d`, `M-u`/`M-l`/`M-c`, `M-t`): a word is a maximal run of
+    /// *alphanumeric* characters — `_rl_walphabetic` (lib/readline/
+    /// rlmbutil.h:216, `ISALNUM` in chardefs.h:103) — and everything else,
+    /// `_` and punctuation included, is separator. Like [`Unicode`](Self::Unicode)
+    /// it is a separate scan in `locate_word`, because separators form no
+    /// words of their own (a class-transition resolver would stop on them).
+    Alphabetic,
 }
 
 /// Which edge of a word a motion lands on.
@@ -1219,29 +1227,31 @@ pub enum UndoBehavior {
 
 impl UndoBehavior {
     /// Return if the current operation should start a new undo set, or be
-    /// combined with the previous operation
+    /// combined with the previous operation.
+    ///
+    /// The grouping follows GNU readline's undo model (A6-F03):
+    /// - Inserts coalesce: `rl_insert_text` (lib/readline/text.c:106-114)
+    ///   concatenates a single-char insert into the previous `UNDO_INSERT`
+    ///   entry *regardless of the characters* — whitespace does not break
+    ///   the run. The one limit, that entry's 20-char cap, needs run-length
+    ///   state a pairwise predicate cannot see; the editor enforces it
+    ///   (`Editor::update_undo_state`) and forces a point at the cap.
+    /// - Deletes never coalesce: `rl_delete_text` (text.c:125) calls
+    ///   `rl_add_undo` unconditionally, so every rubout — `Backspace` or
+    ///   `Delete` — is its own undo entry, one per key press.
     pub fn create_undo_point_after(&self, previous: &UndoBehavior) -> bool {
         use UndoBehavior as UB;
         match (previous, self) {
             // Never start an undo set with cursor movement
             (_, UB::MoveCursor) => false,
             (UB::HistoryNavigation, UB::HistoryNavigation) => false,
-            // When inserting/deleting repeatedly, each undo set should encompass
-            // inserting/deleting a complete word and the associated whitespace
-            (UB::InsertCharacter(c_prev), UB::InsertCharacter(c_new)) => {
-                (*c_prev == '\n' || *c_prev == '\r')
-                    || (!c_prev.is_whitespace() && c_new.is_whitespace())
-            }
-            (UB::Backspace(Some(c_prev)), UB::Backspace(Some(c_new))) => {
-                (*c_new == '\n' || *c_new == '\r')
-                    || (c_prev.is_whitespace() && !c_new.is_whitespace())
-            }
-            (UB::Backspace(_), UB::Backspace(_)) => false,
-            (UB::Delete(Some(c_prev)), UB::Delete(Some(c_new))) => {
-                (*c_new == '\n' || *c_new == '\r')
-                    || (c_prev.is_whitespace() && !c_new.is_whitespace())
-            }
-            (UB::Delete(_), UB::Delete(_)) => false,
+            // Consecutive single-char inserts form one undo set (the
+            // 20-char chunk cap is the editor's run-length check, above).
+            (UB::InsertCharacter(_), UB::InsertCharacter(_)) => false,
+            // One undo entry per rubout press, GNU-style: a delete never
+            // merges into the previous delete's set.
+            (UB::Backspace(_), UB::Backspace(_)) => true,
+            (UB::Delete(_), UB::Delete(_)) => true,
             (_, _) => true,
         }
     }
@@ -1442,6 +1452,18 @@ pub enum ReedlineEvent {
 
     /// Open text editor
     OpenEditor,
+
+    /// Re-read the init file (`$INPUTRC` / `~/.inputrc`) and re-apply its
+    /// bindings and variables — GNU `rl_re_read_init_file`, bound to
+    /// `C-x C-r` in the emacs ctlx keymap (lib/readline/emacs_keymap.c:616).
+    ///
+    /// The engine owns no init file: bindings arrive through the
+    /// host-supplied edit mode, so re-applying them is the host's part.
+    /// The event is the signal the chord produces — hosts driving the
+    /// engine (or a custom [`EditMode`](crate::EditMode)) observe it and
+    /// rebuild their bindings; the stock engine acknowledges it, matching
+    /// GNU's silent successful re-read. A6-F10.
+    ReReadInitFile,
 
     /// Switch the line editor to the named edit mode.
     ///
