@@ -13299,7 +13299,7 @@ mod tests {
         let status = rl
             .handle_history_search_event(ReedlineEvent::ReReadInitFile)
             .unwrap();
-        assert_eq!(status, EventStatus::Handled);
+        assert!(matches!(status, EventStatus::Handled));
         assert_eq!(rl.input_mode, InputMode::Regular);
     }
 

@@ -655,7 +655,8 @@ fn issue43_dot_repeat_after_an_empty_insert_session_replays_the_cut_only() {
     assert_eq!(d.state().0, " two three");
     d.keys("w");
     d.keys(".");
-    assert_eq!(d.state().0, " three");
+    // The replayed `cw` cut is word-end only, so both spaces survive.
+    assert_eq!(d.state().0, "  three");
 }
 
 #[test]

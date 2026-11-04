@@ -1353,13 +1353,8 @@ mod test {
         assert_eq!(
             result,
             ReedlineEvent::Multiple(vec![
-                ReedlineEvent::Edit(vec![EditCommand::Cut {
-                    target: MotionTarget::Word {
-                        kind: WordKind::Word,
-                        edge: WordEdge::End,
-                        direction: Direction::Forward,
-                    },
-                    granularity: Granularity::CharWise
+                ReedlineEvent::Edit(vec![EditCommand::CutViChangeWord {
+                    kind: WordKind::Word,
                 }]),
                 ReedlineEvent::Repaint,
             ])

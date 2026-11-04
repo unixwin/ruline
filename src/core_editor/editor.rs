@@ -2445,8 +2445,7 @@ fn insert_clipboard_content_after(line_buffer: &mut LineBuffer, clipboard: &mut 
                         let base = line_buffer.len();
                         line_buffer.set_insertion_point(base);
                         line_buffer.insert_str(&format!("\n{trimmed}"));
-                        line_buffer
-                            .set_insertion_point(last_pasted_line_start(base + 1, trimmed));
+                        line_buffer.set_insertion_point(last_pasted_line_start(base + 1, trimmed));
                     }
                 }
             }
@@ -2955,22 +2954,23 @@ mod test {
     }
 
     #[test]
-    fn cut_line_down_on_last_line_cuts_only_that_line() {
-        // `dj` on the last line: the motion stays put (no line below), so the
-        // linewise snap consumes just the current line — including its
-        // *leading* `\n` (the buffer-end fixup), leaving no stray blank line.
+    fn cut_line_down_on_last_line_is_a_no_op() {
+        // `dj` on the last line: the line motion *failed* (no line
+        // below), and an operator over a failed motion does nothing
+        // (#33; the vi-level face is probes v52/v59). This pin
+        // previously expected the clamped linewise span to consume
+        // the current line — that clamping was the audited
+        // divergence. The buffer-end leading-`\n` fixup for cuts
+        // that do happen is pinned by `dd_on_last_line_then_paste_*`.
         let mut editor = editor_with("aaa\nbbb\nccc");
         editor.move_to_position(9, false); // inside "ccc"
         editor.run_edit_command(&EditCommand::Cut {
             target: MotionTarget::Line(Direction::Forward),
             granularity: Granularity::LineWise,
         });
-        assert_eq!(editor.get_buffer(), "aaa\nbbb");
-        let (content, gran) = editor.cut_buffer.get();
-        // Register keeps content only; the leading `\n` is eaten from the
-        // deletion alone, keeping a later linewise paste blank-safe.
-        assert_eq!(content, "ccc");
-        assert_eq!(gran, Granularity::LineWise);
+        assert_eq!(editor.get_buffer(), "aaa\nbbb\nccc");
+        let (content, _) = editor.cut_buffer.get();
+        assert_eq!(content, "");
     }
 
     #[test]
@@ -3060,7 +3060,7 @@ mod test {
             granularity: Granularity::LineWise,
         });
         assert_eq!(editor.get_buffer(), "one\ntwo");
-        assert_eq!(editor.cut_buffer.get(), "");
+        assert!(editor.cut_buffer.get().0.is_empty());
 
         let mut editor = vi_editor("one\ntwo", PromptViMode::Normal);
         editor.line_buffer.set_insertion_point(1); // on "one"
@@ -3077,7 +3077,7 @@ mod test {
             target: MotionTarget::Line(Direction::Forward),
             granularity: Granularity::LineWise,
         });
-        assert_eq!(editor.cut_buffer.get(), "");
+        assert!(editor.cut_buffer.get().0.is_empty());
     }
 
     #[test]
@@ -3217,33 +3217,35 @@ mod test {
     }
 
     #[test]
-    fn cut_line_up_on_first_line_cuts_only_that_line() {
-        // `dk` on the first line: no line above, so only the current line goes.
+    fn cut_line_up_on_first_line_is_a_no_op() {
+        // `dk` on the first line: the line motion failed (no line
+        // above), so the operator does nothing (#33; see the `dj`
+        // pin above for the adjudication).
         let mut editor = editor_with("aaa\nbbb\nccc");
         editor.move_to_position(1, false);
         editor.run_edit_command(&EditCommand::Cut {
             target: MotionTarget::Line(Direction::Backward),
             granularity: Granularity::LineWise,
         });
-        assert_eq!(editor.get_buffer(), "bbb\nccc");
-        assert_eq!(editor.insertion_point(), 0);
-        let (content, gran) = editor.cut_buffer.get();
-        assert_eq!(content, "aaa\n");
-        assert_eq!(gran, Granularity::LineWise);
+        assert_eq!(editor.get_buffer(), "aaa\nbbb\nccc");
+        let (content, _) = editor.cut_buffer.get();
+        assert_eq!(content, "");
     }
 
     #[test]
-    fn cut_line_down_on_single_line_buffer_empties_it() {
+    fn cut_line_down_on_single_line_buffer_is_a_no_op() {
+        // Same failed-motion rule on a one-line buffer (#33): `dj`
+        // deletes nothing. Emptying the only line is `dd`'s job
+        // (a LineEdge target), pinned separately.
         let mut editor = editor_with("aaa");
         editor.move_to_position(1, false);
         editor.run_edit_command(&EditCommand::Cut {
             target: MotionTarget::Line(Direction::Forward),
             granularity: Granularity::LineWise,
         });
-        assert_eq!(editor.get_buffer(), "");
-        let (content, gran) = editor.cut_buffer.get();
-        assert_eq!(content, "aaa");
-        assert_eq!(gran, Granularity::LineWise);
+        assert_eq!(editor.get_buffer(), "aaa");
+        let (content, _) = editor.cut_buffer.get();
+        assert_eq!(content, "");
     }
 
     // --- the Change verb (vi linewise change: `cc`/`cj`/`cgg`/`cG`) ---------

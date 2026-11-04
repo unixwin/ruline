@@ -392,7 +392,13 @@ mod tests {
         // against GNU readline) instead of stopping at the é grapheme.
         let buf = "e\u{301}x";
         assert_eq!(
-            locate_word(buf, 0, WordKind::Alphabetic, WordEdge::End, Direction::Forward),
+            locate_word(
+                buf,
+                0,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
             4
         );
         assert_eq!(
@@ -411,11 +417,23 @@ mod tests {
         // after "a" and from the space finishes "b".
         let buf = "a \u{301}b";
         assert_eq!(
-            locate_word(buf, 0, WordKind::Alphabetic, WordEdge::End, Direction::Forward),
+            locate_word(
+                buf,
+                0,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
             1
         );
         assert_eq!(
-            locate_word(buf, 1, WordKind::Alphabetic, WordEdge::End, Direction::Forward),
+            locate_word(
+                buf,
+                1,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
             5
         );
     }
