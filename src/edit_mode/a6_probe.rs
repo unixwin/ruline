@@ -64,7 +64,6 @@ fn emacs_key(em: &mut Emacs, code: KeyCode, mods: KeyModifiers) -> ReedlineEvent
 }
 
 #[test]
-#[ignore = "A6-F10: known divergence, see deep-audit A6 REPORT.md"]
 fn g6_ctrl_x_ctrl_r_re_reads_init_file() {
     // GNU emacs_ctlx_keymap (emacs_keymap.c:616): C-x C-r =
     // re-read-init-file. The chord must resolve to a real event.
@@ -72,6 +71,22 @@ fn g6_ctrl_x_ctrl_r_re_reads_init_file() {
     let _ = emacs_key(&mut em, KeyCode::Char('x'), KeyModifiers::CONTROL);
     let ev = emacs_key(&mut em, KeyCode::Char('r'), KeyModifiers::CONTROL);
     assert_ne!(ev, ReedlineEvent::None, "C-x C-r resolved to nothing");
+}
+
+#[test]
+fn issue37_ctrl_x_ctrl_r_yields_the_re_read_init_file_event() {
+    // The chord resolves to exactly the dedicated public event, and a
+    // plain (non-control) `r` after C-x stays unbound — only C-r is
+    // re-read-init-file in the ctlx keymap.
+    let mut em = Emacs::default();
+    let _ = emacs_key(&mut em, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    let ev = emacs_key(&mut em, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(ev, ReedlineEvent::ReReadInitFile);
+
+    let mut em = Emacs::default();
+    let _ = emacs_key(&mut em, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    let ev = emacs_key(&mut em, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(ev, ReedlineEvent::None);
 }
 
 #[test]

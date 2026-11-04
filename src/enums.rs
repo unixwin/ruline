@@ -1453,6 +1453,18 @@ pub enum ReedlineEvent {
     /// Open text editor
     OpenEditor,
 
+    /// Re-read the init file (`$INPUTRC` / `~/.inputrc`) and re-apply its
+    /// bindings and variables — GNU `rl_re_read_init_file`, bound to
+    /// `C-x C-r` in the emacs ctlx keymap (lib/readline/emacs_keymap.c:616).
+    ///
+    /// The engine owns no init file: bindings arrive through the
+    /// host-supplied edit mode, so re-applying them is the host's part.
+    /// The event is the signal the chord produces — hosts driving the
+    /// engine (or a custom [`EditMode`](crate::EditMode)) observe it and
+    /// rebuild their bindings; the stock engine acknowledges it, matching
+    /// GNU's silent successful re-read. A6-F10.
+    ReReadInitFile,
+
     /// Switch the line editor to the named edit mode.
     ///
     /// The target names both the machine and the state to land in, so
