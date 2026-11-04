@@ -586,8 +586,10 @@ mod tests {
         // (`;`) from that landing spot searches from the next grapheme — the
         // target char itself — re-finds the *same* occurrence, and lands back
         // where it began. Vim (default cpoptions) skips to the next occurrence
-        // instead; reedline keeps the historical stuck behavior, pinned here so
-        // any future change to it is deliberate.
+        // instead. The stuck behavior is GNU-faithful, not a local quirk:
+        // `_rl_char_search_internal` steps one char past point before
+        // checking (text.c:1720), so GNU readline re-matches the same char
+        // too (PTY-probed 2026-11-04, Wave A ruline lane).
         let t = find('x', Direction::Forward, FindStop::Before);
         // "axbxc": x@1, x@3. From 0 (adjacent to x@1): stays at 0.
         assert_eq!(resolve_motion("axbxc", 0, t, CaretGeometry::Block).head, 0);

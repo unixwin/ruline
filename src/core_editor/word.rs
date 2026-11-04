@@ -212,10 +212,15 @@ fn locate_unicode_word(buf: &str, origin: usize, edge: WordEdge, direction: Dire
 /// `Alphabetic` (GNU readline) word location: a word is a maximal run of
 /// alphanumeric characters (`_rl_walphabetic`, lib/readline/rlmbutil.h:216 —
 /// `ISALNUM`, chardefs.h:103; the multibyte build's `iswalnum`, which
-/// `char::is_alphanumeric` mirrors). Everything else — whitespace, line
-/// endings, punctuation, `_` — is separator and forms no word, which is the
-/// whole behavioral content of `rl_forward_word` / `rl_backward_word`
-/// (text.c:488 / text.c:540): skip separators, then consume the run.
+/// `char::is_alphanumeric` mirrors). The classification applies per
+/// grapheme cluster by its base char, since the multibyte build reads
+/// base+combining-marks as one character: U+0301 alone is not
+/// alphanumeric, yet "e\u{301}" is one alphabetic character to GNU and
+/// the run continues into the next letter. Everything else —
+/// whitespace, line endings, punctuation, `_` — is separator and forms
+/// no word, which is the whole behavioral content of
+/// `rl_forward_word` / `rl_backward_word` (text.c:488 / text.c:540):
+/// skip separators, then consume the run.
 ///
 /// Landings are *bar* boundaries over the run set, mirroring the class
 /// flavors' geometry: `(Forward, End)` is the end of the first run ending
@@ -225,11 +230,22 @@ fn locate_unicode_word(buf: &str, origin: usize, edge: WordEdge, direction: Dire
 /// consumers that ask for them. Start landings floor onto a grapheme
 /// boundary and end landings snap forward, like [`locate_word`]'s scans.
 fn locate_alphabetic_word(buf: &str, origin: usize, edge: WordEdge, direction: Direction) -> usize {
-    // Maximal alphanumeric runs as (start, end) byte ranges.
+    // Maximal alphanumeric runs as (start, end) byte ranges, classified
+    // per grapheme cluster by its base char: a cluster whose base is
+    // alphanumeric is a word cluster whole, combining marks and all.
+    // A per-char scan ends the run mid-grapheme after the base of e.g.
+    // "e\u{301}" (U+0301 is not itself alphanumeric) and the landing
+    // snap then stops the motion at the grapheme ceiling, where GNU's
+    // wide-char build reads base+marks as one alphabetic character —
+    // `M-f` over "e\u{301}x" lands past the `x`, one whole word.
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut run_start: Option<usize> = None;
-    for (byte, ch) in buf.char_indices() {
-        if ch.is_alphanumeric() {
+    for (byte, cluster) in buf.grapheme_indices(true) {
+        let word_cluster = cluster
+            .chars()
+            .next()
+            .is_some_and(|base| base.is_alphanumeric());
+        if word_cluster {
             if run_start.is_none() {
                 run_start = Some(byte);
             }
@@ -364,6 +380,61 @@ mod tests {
                 Direction::Forward
             ),
             3
+        );
+    }
+
+    #[test]
+    fn issue46_alphabetic_combining_marks_ride_their_base_char() {
+        // "e\u{301}x" is e + COMBINING ACUTE + x: 4 bytes, 2 graphemes.
+        // U+0301 is not alphanumeric by itself, but GNU's multibyte
+        // build reads base+marks as one alphabetic character, so `M-f`
+        // from 0 consumes the whole string as one word (PTY-probed
+        // against GNU readline) instead of stopping at the é grapheme.
+        let buf = "e\u{301}x";
+        assert_eq!(
+            locate_word(
+                buf,
+                0,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
+            4
+        );
+        assert_eq!(
+            locate_word(
+                buf,
+                4,
+                WordKind::Alphabetic,
+                WordEdge::Start,
+                Direction::Backward
+            ),
+            0
+        );
+        // A mark on the far side of a separator still separates: the
+        // buffer "a \u{301}b" has the mark leading its own cluster
+        // (base = the mark, not alphanumeric), so `M-f` from 0 stops
+        // after "a" and from the space finishes "b".
+        let buf = "a \u{301}b";
+        assert_eq!(
+            locate_word(
+                buf,
+                0,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
+            1
+        );
+        assert_eq!(
+            locate_word(
+                buf,
+                1,
+                WordKind::Alphabetic,
+                WordEdge::End,
+                Direction::Forward
+            ),
+            5
         );
     }
 

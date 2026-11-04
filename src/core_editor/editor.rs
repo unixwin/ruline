@@ -260,46 +260,54 @@ impl Editor {
                 target,
                 granularity,
             } => {
-                let sel = operator_span(
-                    self.get_buffer(),
-                    self.insertion_point(),
-                    *target,
-                    self.caret_geometry(),
-                );
-                self.operate(sel, OperatorVerb::Cut, *granularity);
+                if self.operator_motion_live(*target) {
+                    let sel = operator_span(
+                        self.get_buffer(),
+                        self.insertion_point(),
+                        *target,
+                        self.caret_geometry(),
+                    );
+                    self.operate(sel, OperatorVerb::Cut, *granularity);
+                }
             }
             EditCommand::Copy {
                 target,
                 granularity,
             } => {
-                let sel = operator_span(
-                    self.get_buffer(),
-                    self.insertion_point(),
-                    *target,
-                    self.caret_geometry(),
-                );
-                self.operate(sel, OperatorVerb::Copy, *granularity);
+                if self.operator_motion_live(*target) {
+                    let sel = operator_span(
+                        self.get_buffer(),
+                        self.insertion_point(),
+                        *target,
+                        self.caret_geometry(),
+                    );
+                    self.operate(sel, OperatorVerb::Copy, *granularity);
+                }
             }
             EditCommand::Change {
                 target,
                 granularity,
             } => {
-                let sel = operator_span(
-                    self.get_buffer(),
-                    self.insertion_point(),
-                    *target,
-                    self.caret_geometry(),
-                );
-                self.operate(sel, OperatorVerb::Change, *granularity);
+                if self.operator_motion_live(*target) {
+                    let sel = operator_span(
+                        self.get_buffer(),
+                        self.insertion_point(),
+                        *target,
+                        self.caret_geometry(),
+                    );
+                    self.operate(sel, OperatorVerb::Change, *granularity);
+                }
             }
             EditCommand::Erase(t) => {
-                let sel = operator_span(
-                    self.get_buffer(),
-                    self.insertion_point(),
-                    *t,
-                    self.caret_geometry(),
-                );
-                self.operate(sel, OperatorVerb::Erase, Granularity::CharWise);
+                if self.operator_motion_live(*t) {
+                    let sel = operator_span(
+                        self.get_buffer(),
+                        self.insertion_point(),
+                        *t,
+                        self.caret_geometry(),
+                    );
+                    self.operate(sel, OperatorVerb::Erase, Granularity::CharWise);
+                }
             }
             EditCommand::InsertChar(c) => self.insert_char(*c),
             EditCommand::Complete => {}
@@ -338,6 +346,7 @@ impl Editor {
             EditCommand::CutWordRight => self.cut_word_right(),
             EditCommand::CutBigWordRight => self.cut_big_word_right(),
             EditCommand::CutWordRightToNext => self.cut_word_right_to_next(),
+            EditCommand::CutViChangeWord { kind } => self.cut_vi_change_word(*kind),
             EditCommand::CutBigWordRightToNext => self.cut_big_word_right_to_next(),
             EditCommand::PasteCutBufferBefore => self.paste_cut_buffer_before(),
             EditCommand::PasteCutBufferAfter => self.paste_cut_buffer_after(),
@@ -901,6 +910,28 @@ impl Editor {
         self.operate(sel, verb, Granularity::CharWise);
     }
 
+    /// Whether an operator over `target` has a live motion at all. A vi
+    /// line motion ([`MotionTarget::Line`]) that cannot leave the current
+    /// line has *failed* — `rl_vi_next_line`/`rl_vi_prev_line` return
+    /// MOVE_FAILED with no adjacent line — and an operator over a failed
+    /// motion does nothing: `dj` on the last line deletes nothing.
+    /// Without this gate the linewise span snap would clamp the failed
+    /// motion to the current line and silently delete it (A6-F05).
+    /// Every other target resolves totally — a motion that stays at the
+    /// origin yields an empty span, which the operators already treat
+    /// as a no-op — so only the line target needs the check.
+    fn operator_motion_live(&self, target: MotionTarget) -> bool {
+        !matches!(target, MotionTarget::Line(_))
+            || resolve_motion(
+                self.get_buffer(),
+                self.insertion_point(),
+                target,
+                self.caret_geometry(),
+            )
+            .head
+                != self.insertion_point()
+    }
+
     pub(crate) fn move_line_up(&mut self, select: bool) {
         if let Some(target) = self.line_buffer.line_up_target() {
             self.move_head_to(target, select);
@@ -1284,6 +1315,35 @@ impl Editor {
             word_target(WordKind::Alphabetic, WordEdge::Start, Direction::Forward),
             OperatorVerb::Cut,
         );
+    }
+
+    /// GNU's vi `cw`/`cW` span (`_rl_vi_domove_motion_cleanup`,
+    /// vi_mode.c:1250-1272): the `w` landing backs off one char and the
+    /// `cw` rule then advances one char from the mark. On a word
+    /// character that composes to the word-end span (`cw`≡`ce`); on
+    /// whitespace (`whitespace()` = space/tab) the back-off lands back
+    /// on the mark and the advance leaves exactly one grapheme — only
+    /// the gap is changed, however wide the gap is (A6-F17).
+    fn cut_vi_change_word(&mut self, kind: WordKind) {
+        let origin = self.insertion_point();
+        let on_whitespace = self
+            .get_buffer()
+            .get(origin..)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c == ' ' || c == '\t');
+        if on_whitespace {
+            let end = next_grapheme_boundary(self.get_buffer(), origin);
+            self.operate(
+                Cursor::new(origin, end),
+                OperatorVerb::Cut,
+                Granularity::CharWise,
+            );
+        } else {
+            self.apply_operator(
+                word_target(kind, WordEdge::End, Direction::Forward),
+                OperatorVerb::Cut,
+            );
+        }
     }
 
     fn cut_big_word_right_to_next(&mut self) {
@@ -2351,6 +2411,15 @@ fn insert_clipboard_content_after(line_buffer: &mut LineBuffer, clipboard: &mut 
             if !content.ends_with('\n') {
                 content.push('\n');
             }
+            // Leave the caret at the start of the *last* pasted line.
+            // A counted `p` reapplies this command once per count, so the
+            // resting line decides where the next copy lands: resting
+            // past the block (the raw post-insert point) made copy two
+            // append below the following line instead of stacking under
+            // the first copy (A6-F07).
+            let last_pasted_line_start = |block_start: usize, block: &str| {
+                block_start + block.rfind('\n').map_or(0, |i| i + 1)
+            };
             let ip = line_buffer.insertion_point();
             match line::start_of_next_line(line_buffer.get_buffer(), ip) {
                 // A line exists below: insert at its start so the pasted lines
@@ -2358,6 +2427,8 @@ fn insert_clipboard_content_after(line_buffer: &mut LineBuffer, clipboard: &mut 
                 Some(next) => {
                     line_buffer.set_insertion_point(next);
                     line_buffer.insert_str(&content);
+                    let body = &content[..content.len() - 1];
+                    line_buffer.set_insertion_point(last_pasted_line_start(next, body));
                 }
                 // Last line: no line below, so append after the current line's
                 // terminator. Drop the trailing `\n` so no blank line is added,
@@ -2369,9 +2440,12 @@ fn insert_clipboard_content_after(line_buffer: &mut LineBuffer, clipboard: &mut 
                         // empty buffer (e.g. after `dd` on the only line) does
                         // not gain a leading blank line.
                         line_buffer.insert_str(trimmed);
+                        line_buffer.set_insertion_point(last_pasted_line_start(0, trimmed));
                     } else {
-                        line_buffer.set_insertion_point(line_buffer.len());
+                        let base = line_buffer.len();
+                        line_buffer.set_insertion_point(base);
                         line_buffer.insert_str(&format!("\n{trimmed}"));
+                        line_buffer.set_insertion_point(last_pasted_line_start(base + 1, trimmed));
                     }
                 }
             }
@@ -2880,22 +2954,23 @@ mod test {
     }
 
     #[test]
-    fn cut_line_down_on_last_line_cuts_only_that_line() {
-        // `dj` on the last line: the motion stays put (no line below), so the
-        // linewise snap consumes just the current line — including its
-        // *leading* `\n` (the buffer-end fixup), leaving no stray blank line.
+    fn cut_line_down_on_last_line_is_a_no_op() {
+        // `dj` on the last line: the line motion *failed* (no line
+        // below), and an operator over a failed motion does nothing
+        // (#33; the vi-level face is probes v52/v59). This pin
+        // previously expected the clamped linewise span to consume
+        // the current line — that clamping was the audited
+        // divergence. The buffer-end leading-`\n` fixup for cuts
+        // that do happen is pinned by `dd_on_last_line_then_paste_*`.
         let mut editor = editor_with("aaa\nbbb\nccc");
         editor.move_to_position(9, false); // inside "ccc"
         editor.run_edit_command(&EditCommand::Cut {
             target: MotionTarget::Line(Direction::Forward),
             granularity: Granularity::LineWise,
         });
-        assert_eq!(editor.get_buffer(), "aaa\nbbb");
-        let (content, gran) = editor.cut_buffer.get();
-        // Register keeps content only; the leading `\n` is eaten from the
-        // deletion alone, keeping a later linewise paste blank-safe.
-        assert_eq!(content, "ccc");
-        assert_eq!(gran, Granularity::LineWise);
+        assert_eq!(editor.get_buffer(), "aaa\nbbb\nccc");
+        let (content, _) = editor.cut_buffer.get();
+        assert_eq!(content, "");
     }
 
     #[test]
@@ -2975,6 +3050,110 @@ mod test {
     }
 
     #[test]
+    fn issue33_line_operator_at_buffer_edge_does_nothing() {
+        // `dj` on the last line / `dk` on the first: the line motion
+        // failed, so the operator must not clamp to the current line.
+        let mut editor = vi_editor("one\ntwo", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(5); // on "two"
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::Line(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "one\ntwo");
+        assert!(editor.cut_buffer.get().0.is_empty());
+
+        let mut editor = vi_editor("one\ntwo", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(1); // on "one"
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::Line(Direction::Backward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "one\ntwo");
+
+        // Yank over the same failed motion fills no register either.
+        let mut editor = vi_editor("one\ntwo", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(5);
+        editor.run_edit_command(&EditCommand::Copy {
+            target: MotionTarget::Line(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert!(editor.cut_buffer.get().0.is_empty());
+    }
+
+    #[test]
+    fn issue33_line_operator_with_a_live_line_still_spans_both_lines() {
+        let mut editor = vi_editor("one\ntwo", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(1); // on "one"
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::Line(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "");
+    }
+
+    #[test]
+    fn issue42_cw_on_whitespace_cuts_only_the_gap() {
+        // GNU `_rl_vi_domove_motion_cleanup` (vi_mode.c:1250-1272): the
+        // `w` back-off and the `cw` advance cancel onto the mark, so the
+        // span is the single grapheme under the caret — one space of the
+        // gap, however wide the gap is.
+        let mut editor = editor_with("one two");
+        editor.line_buffer.set_insertion_point(3);
+        editor.run_edit_command(&EditCommand::CutViChangeWord {
+            kind: WordKind::Word,
+        });
+        assert_eq!(editor.get_buffer(), "onetwo");
+        assert_eq!(editor.insertion_point(), 3);
+
+        let mut editor = editor_with("one  two");
+        editor.line_buffer.set_insertion_point(3);
+        editor.run_edit_command(&EditCommand::CutViChangeWord {
+            kind: WordKind::Word,
+        });
+        assert_eq!(editor.get_buffer(), "one two");
+    }
+
+    #[test]
+    fn issue42_cw_on_a_word_char_cuts_to_the_word_end() {
+        // The on-word face of the same rule is the classic `cw`≡`ce`.
+        let mut editor = editor_with("one two");
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::CutViChangeWord {
+            kind: WordKind::Word,
+        });
+        assert_eq!(editor.get_buffer(), " two");
+
+        let mut editor = editor_with("one two");
+        editor.line_buffer.set_insertion_point(1);
+        editor.run_edit_command(&EditCommand::CutViChangeWord {
+            kind: WordKind::Word,
+        });
+        assert_eq!(editor.get_buffer(), "o two");
+    }
+
+    #[test]
+    fn issue34_counted_linewise_paste_stacks_below_the_original_line() {
+        // `2p` reapplies the paste command; the second copy must land
+        // under the first, not under the line that followed the block.
+        let mut editor = vi_editor("one\ntwo", PromptViMode::Normal);
+        editor.cut_buffer.set("one", Granularity::LineWise);
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::PasteCutBufferAfter);
+        editor.run_edit_command(&EditCommand::PasteCutBufferAfter);
+        assert_eq!(editor.get_buffer(), "one\none\none\ntwo");
+    }
+
+    #[test]
+    fn issue34_linewise_paste_leaves_caret_on_the_last_pasted_line() {
+        let mut editor = vi_editor("one\ntwo", PromptViMode::Normal);
+        editor.cut_buffer.set("one", Granularity::LineWise);
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::PasteCutBufferAfter);
+        assert_eq!(editor.get_buffer(), "one\none\ntwo");
+        assert_eq!(editor.insertion_point(), 4); // start of the pasted "one"
+    }
+
+    #[test]
     fn paste_after_linewise_on_last_line_lands_below() {
         // Regression: `p` on the last line fell back to the line start (no line
         // below), pasting *above* like `P`.
@@ -3038,33 +3217,35 @@ mod test {
     }
 
     #[test]
-    fn cut_line_up_on_first_line_cuts_only_that_line() {
-        // `dk` on the first line: no line above, so only the current line goes.
+    fn cut_line_up_on_first_line_is_a_no_op() {
+        // `dk` on the first line: the line motion failed (no line
+        // above), so the operator does nothing (#33; see the `dj`
+        // pin above for the adjudication).
         let mut editor = editor_with("aaa\nbbb\nccc");
         editor.move_to_position(1, false);
         editor.run_edit_command(&EditCommand::Cut {
             target: MotionTarget::Line(Direction::Backward),
             granularity: Granularity::LineWise,
         });
-        assert_eq!(editor.get_buffer(), "bbb\nccc");
-        assert_eq!(editor.insertion_point(), 0);
-        let (content, gran) = editor.cut_buffer.get();
-        assert_eq!(content, "aaa\n");
-        assert_eq!(gran, Granularity::LineWise);
+        assert_eq!(editor.get_buffer(), "aaa\nbbb\nccc");
+        let (content, _) = editor.cut_buffer.get();
+        assert_eq!(content, "");
     }
 
     #[test]
-    fn cut_line_down_on_single_line_buffer_empties_it() {
+    fn cut_line_down_on_single_line_buffer_is_a_no_op() {
+        // Same failed-motion rule on a one-line buffer (#33): `dj`
+        // deletes nothing. Emptying the only line is `dd`'s job
+        // (a LineEdge target), pinned separately.
         let mut editor = editor_with("aaa");
         editor.move_to_position(1, false);
         editor.run_edit_command(&EditCommand::Cut {
             target: MotionTarget::Line(Direction::Forward),
             granularity: Granularity::LineWise,
         });
-        assert_eq!(editor.get_buffer(), "");
-        let (content, gran) = editor.cut_buffer.get();
-        assert_eq!(content, "aaa");
-        assert_eq!(gran, Granularity::LineWise);
+        assert_eq!(editor.get_buffer(), "aaa");
+        let (content, _) = editor.cut_buffer.get();
+        assert_eq!(content, "");
     }
 
     // --- the Change verb (vi linewise change: `cc`/`cj`/`cgg`/`cG`) ---------

@@ -2,7 +2,7 @@ use super::{motion::Motion, parser::ReedlineOption, ViMode};
 use crate::enums::{
     TextObject, TextObjectBracket, TextObjectQuote, TextObjectScope, TextObjectType,
 };
-use crate::{Direction, EditCommand, Granularity, MotionTarget, ReedlineEvent, Vi};
+use crate::{Direction, EditCommand, Granularity, MotionTarget, ReedlineEvent, Vi, WordKind};
 use std::iter::Peekable;
 
 pub(super) fn parse_command<'iter, I>(mode: ViMode, input: &mut Peekable<I>) -> Option<Command>
@@ -34,6 +34,12 @@ where
         Some('i') => {
             let _ = input.next();
             Some(Command::EnterViInsert)
+        }
+        // GNU `rl_vi_replace` (vi_keymap.c:126): insert with overstrike
+        // until Esc.
+        Some('R') if mode == ViMode::Normal => {
+            let _ = input.next();
+            Some(Command::EnterViReplace)
         }
         Some('a') => {
             let _ = input.next();
@@ -200,6 +206,9 @@ pub(super) enum Command {
     PasteBefore,
     EnterViAppend,
     EnterViInsert,
+    /// vi `R` — GNU `rl_vi_replace` (vi_mode.c:2278): enter insert with
+    /// overstrike on; Esc turns it back off.
+    EnterViReplace,
     Undo,
     ChangeToLineEnd,
     DeleteToEnd,
@@ -256,6 +265,18 @@ impl Command {
     pub fn to_reedline(&self, vi_state: &mut Vi) -> Vec<ReedlineOption> {
         match self {
             Self::EnterViInsert => vec![ReedlineOption::Event(ReedlineEvent::Repaint)],
+            Self::EnterViReplace => {
+                // GNU `rl_vi_replace` (vi_mode.c:2278): insert with
+                // overstrike. The flag lets `Vi::escape` know this
+                // session owns the overwrite state, so Esc clears it —
+                // an overwrite toggle from a plain insert session is
+                // not this command's to clear.
+                vi_state.replace_session = true;
+                vec![
+                    ReedlineOption::Event(ReedlineEvent::OverwriteMode(Some(true))),
+                    ReedlineOption::Event(ReedlineEvent::Repaint),
+                ]
+            }
             Self::EnterViAppend => vec![ReedlineOption::Edit(EditCommand::MoveRight {
                 select: false,
             })],
@@ -457,31 +478,37 @@ impl Command {
                         target: MotionTarget::LineEdge(Direction::Forward),
                         granularity: Granularity::LineWise,
                     })]),
-                    // `cw`/`cW` act like `ce`/`cE`: change to the word *end*, not the
-                    // next word's start. Other word and line-edge motions (`c$`/`c0`)
-                    // use their own target.
-                    Motion::NextWord
-                    | Motion::NextBigWord
-                    | Motion::NextWordEnd
+                    // `cw`/`cW`: GNU computes the span from the `w`
+                    // landing in `_rl_vi_domove_motion_cleanup`
+                    // (vi_mode.c:1250-1272) — the word end when the
+                    // caret sits on a word character (`cw`≡`ce`), but
+                    // only the gap when it sits on whitespace. That
+                    // buffer-dependent span has its own command; the
+                    // editor resolves it (A6-F17).
+                    Motion::NextWord | Motion::NextBigWord => {
+                        let kind = match motion {
+                            Motion::NextWord => WordKind::Word,
+                            _ => WordKind::LongWord,
+                        };
+                        Some(vec![ReedlineOption::Edit(EditCommand::CutViChangeWord {
+                            kind,
+                        })])
+                    }
+                    // `ce`/`cE` and the other word and line-edge motions
+                    // (`c$`/`c0`) use their own target.
+                    Motion::NextWordEnd
                     | Motion::NextBigWordEnd
                     | Motion::PreviousWord
                     | Motion::PreviousBigWord
                     | Motion::Start
                     | Motion::End
                     | Motion::MatchBrackets
-                    | Motion::Column => {
-                        let target = match motion {
-                            Motion::NextWord => Motion::NextWordEnd.target(),
-                            Motion::NextBigWord => Motion::NextBigWordEnd.target(),
-                            other => other.target(),
-                        };
-                        target.map(|target| {
-                            vec![ReedlineOption::Edit(EditCommand::Cut {
-                                target,
-                                granularity: Granularity::CharWise,
-                            })]
-                        })
-                    }
+                    | Motion::Column => motion.target().map(|target| {
+                        vec![ReedlineOption::Edit(EditCommand::Cut {
+                            target,
+                            granularity: Granularity::CharWise,
+                        })]
+                    }),
                     Motion::RightUntil(_)
                     | Motion::RightBefore(_)
                     | Motion::LeftUntil(_)

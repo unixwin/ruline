@@ -53,6 +53,13 @@ impl Driver {
                     self.apply(e);
                 }
             }
+            // The engine routes this to `Editor::set_overwrite`
+            // (engine.rs, `ReedlineEvent::OverwriteMode`); mirror it so
+            // `R` sessions overstrike in the probe like in the product.
+            ReedlineEvent::OverwriteMode(on) => {
+                let next = on.unwrap_or(!self.editor.overwrite());
+                self.editor.set_overwrite(next);
+            }
             _ => {}
         }
     }
@@ -423,7 +430,6 @@ fn v40_d_with_failed_motion_deletes_nothing() {
 // ---------------- round 3 ----------------
 
 #[test]
-#[ignore = "A6-F08: known divergence, see deep-audit A6 REPORT.md"]
 fn v42_big_r_enters_replace_mode() {
     // GNU vi-command: R = rl_vi_replace (vi_keymap.c:126) — overwrite
     // until Esc.
@@ -484,7 +490,6 @@ fn v47_backward_find_and_repeat_directions() {
 }
 
 #[test]
-#[ignore = "A6-F06: known divergence, see deep-audit A6 REPORT.md"]
 fn v48_paste_with_count() {
     let mut d = Driver::new("one\ntwo", 0, ViMode::Normal);
     d.keys("yy");
@@ -524,7 +529,23 @@ fn v51_dd_only_line_and_last_line() {
 }
 
 #[test]
-#[ignore = "A6-F05: known divergence, see deep-audit A6 REPORT.md"]
+fn issue42_cw_on_a_wide_gap_changes_a_single_space() {
+    // GNU's domove cleanup (vi_mode.c:1250-1272) collapses the `cw`
+    // span onto the mark plus one char, whatever the gap width.
+    let mut d = Driver::new("one  two", 3, ViMode::Normal);
+    d.keys("cw");
+    d.keys("X");
+    d.esc();
+    assert_eq!(d.state().0, "oneX two");
+    // Same for `cW` (the LongWord flavor of the same rule).
+    let mut d = Driver::new("one  two", 3, ViMode::Normal);
+    d.keys("cW");
+    d.keys("X");
+    d.esc();
+    assert_eq!(d.state().0, "oneX two");
+}
+
+#[test]
 fn v52_dj_on_last_line_does_nothing() {
     let mut d = Driver::new("one\ntwo", 4, ViMode::Normal);
     d.keys("dj");
@@ -532,7 +553,11 @@ fn v52_dj_on_last_line_does_nothing() {
 }
 
 #[test]
-#[ignore = "A6-F07: known divergence, see deep-audit A6 REPORT.md"]
+#[ignore = "premise refuted 2026-11-04 (Wave A ruline lane): GNU _rl_char_search_internal \
+            steps one char past point before checking (text.c:1720), so a repeat from \
+            the t/T landing spot re-matches the same char — GNU is stuck too (PTY-probed); \
+            the advance expectation below is vim semantics. Kept ignored pending captain \
+            adjudication of the pin itself"]
 fn v53_operator_semicolon_repeats_till() {
     let mut d = Driver::new("ab,cd,ef", 0, ViMode::Normal);
     d.keys("t,");
@@ -546,7 +571,6 @@ fn v53_operator_semicolon_repeats_till() {
 }
 
 #[test]
-#[ignore = "A6-F05: known divergence, see deep-audit A6 REPORT.md"]
 fn v59_dk_on_first_line_does_nothing() {
     let mut d = Driver::new("one\ntwo", 0, ViMode::Normal);
     d.keys("dk");
@@ -595,7 +619,6 @@ fn v61_tilde_with_count() {
 }
 
 #[test]
-#[ignore = "A6-F18: known divergence, see deep-audit A6 REPORT.md"]
 fn v62_dot_repeat_replays_change_and_its_text() {
     let mut d = Driver::new("one two three", 0, ViMode::Normal);
     d.keys("cw");
@@ -608,7 +631,50 @@ fn v62_dot_repeat_replays_change_and_its_text() {
 }
 
 #[test]
-#[ignore = "A6-F18: known divergence, see deep-audit A6 REPORT.md"]
+fn issue43_dot_repeat_folds_rubouts_into_the_captured_text() {
+    // Type "XY", rub out the "Y": the replay must insert only "X"
+    // (GNU folds the session's rubouts into `_rl_vi_last_insert`).
+    let mut d = Driver::new("one two three", 0, ViMode::Normal);
+    d.keys("cw");
+    d.keys("XY");
+    d.key(KeyCode::Backspace, KeyModifiers::NONE);
+    assert_eq!(d.state().0, "X two three");
+    d.esc();
+    d.keys("w");
+    d.keys(".");
+    assert_eq!(d.state().0, "X X three");
+}
+
+#[test]
+fn issue43_dot_repeat_after_an_empty_insert_session_replays_the_cut_only() {
+    // `cw` straight to Esc typed nothing: `.` must not gain a phantom
+    // insert from the empty capture.
+    let mut d = Driver::new("one two three", 0, ViMode::Normal);
+    d.keys("cw");
+    d.esc();
+    assert_eq!(d.state().0, " two three");
+    d.keys("w");
+    d.keys(".");
+    // The replayed `cw` cut is word-end only, so both spaces survive.
+    assert_eq!(d.state().0, "  three");
+}
+
+#[test]
+fn issue36_replace_mode_turns_overstrike_back_off_at_esc() {
+    let mut d = Driver::new("abc", 0, ViMode::Normal);
+    d.keys("R");
+    d.keys("X");
+    assert_eq!(d.state().0, "Xbc");
+    assert!(d.editor.overwrite());
+    d.esc();
+    assert!(!d.editor.overwrite());
+    // A following plain insert session inserts, not overstrikes.
+    d.keys("i");
+    d.keys("Y");
+    assert_eq!(d.state().0, "YXbc");
+}
+
+#[test]
 fn v63_dot_repeat_replays_plain_insert() {
     let mut d = Driver::new("ab", 0, ViMode::Normal);
     d.keys("i");
