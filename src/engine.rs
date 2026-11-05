@@ -5719,6 +5719,9 @@ fn closer_offsets_for_hint(
 }
 
 #[cfg(test)]
+mod repl_chains;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::terminal_extensions::semantic_prompt::PromptKind;

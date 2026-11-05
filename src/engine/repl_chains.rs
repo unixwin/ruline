@@ -1,0 +1,1145 @@
+//! Chain-style editor behaviour tests for the interactive REPL surface.
+//!
+//! Each test is a *chain*: a sequence of keystrokes where the intermediate
+//! state (buffer text, insertion point in bytes and graphemes, kill-ring
+//! slot/count, input mode) is asserted after **every** step, not just at
+//! the end. A regression that leaves the final state correct but corrupts
+//! a mid-chain state (wrong ring merge order, cursor landing inside a
+//! grapheme cluster, a paste that submits line-by-line) is exactly what
+//! these tests exist to catch.
+//!
+//! Expected behaviour follows GNU readline semantics (the engine's stated
+//! contract); where a chain pins a GNU behaviour the implementation does
+//! not yet have, the test is `#[ignore]`d and the divergence is recorded
+//! in the lane report instead of bending the expectation.
+//!
+//! The interactive-test duty for this surface comes from
+//! unixwin/niubash#827 (PTY/interactive gate); these are the headless
+//! unit-level chains underneath it.
+
+use super::*;
+use crate::{DefaultPrompt, HistoryItem};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+// ---------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------
+
+/// An Emacs-mode engine anchored the way the engine test-suite anchors
+/// it, so repaint state never leaks into editing state.
+fn new_rl() -> Reedline {
+    let mut rl = Reedline::create().with_edit_mode(Box::<Emacs>::default());
+    rl.painter.force_prompt_anchored_for_test(0);
+    rl
+}
+
+fn new_rl_with_pairs(pairs: &[(char, char)]) -> Reedline {
+    let mut rl = Reedline::create()
+        .with_edit_mode(Box::<Emacs>::default())
+        .with_auto_pairs(AutoPairs::new(pairs.iter().copied()));
+    rl.painter.force_prompt_anchored_for_test(0);
+    rl
+}
+
+fn drive(rl: &mut Reedline, keys: &[KeyEvent]) -> ControlFlow<Signal> {
+    let prompt = DefaultPrompt::default();
+    let events: Vec<Event> = keys.iter().copied().map(Event::Key).collect();
+    rl.process_input_batch(&prompt, events).expect("batch ok")
+}
+
+/// One key per input batch, the way real keystrokes arrive.
+fn press(rl: &mut Reedline, k: KeyEvent) {
+    let _ = drive(rl, &[k]);
+}
+
+/// Like [`press`], but returns the batch flow so a chain can assert
+/// whether the line submitted.
+fn press_flow(rl: &mut Reedline, k: KeyEvent) -> ControlFlow<Signal> {
+    drive(rl, &[k])
+}
+
+/// Type a string one char per batch.
+fn type_str(rl: &mut Reedline, s: &str) {
+    for c in s.chars() {
+        press(rl, ch(c));
+    }
+}
+
+fn paste(rl: &mut Reedline, text: &str) {
+    let _ = paste_flow(rl, text);
+}
+
+fn paste_flow(rl: &mut Reedline, text: &str) -> ControlFlow<Signal> {
+    let prompt = DefaultPrompt::default();
+    rl.process_input_batch(&prompt, vec![Event::Paste(text.into())])
+        .expect("paste batch ok")
+}
+
+fn seed_history(rl: &mut Reedline, entries: &[&str]) {
+    for entry in entries {
+        rl.history
+            .save(HistoryItem::from_command_line(*entry))
+            .expect("failed to save history");
+    }
+}
+
+fn ch(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+}
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+fn alt(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn alt_key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::ALT)
+}
+
+// ---------------------------------------------------------------------
+// State probes
+// ---------------------------------------------------------------------
+
+fn buf(rl: &Reedline) -> &str {
+    rl.editor.get_buffer()
+}
+
+/// Byte offset of the insertion point.
+fn pos(rl: &Reedline) -> usize {
+    rl.editor.insertion_point()
+}
+
+/// Grapheme index of the insertion point (number of whole grapheme
+/// clusters before it). Only meaningful when the point sits on a
+/// grapheme boundary — which the wide-char chains assert separately.
+fn gpos(rl: &Reedline) -> usize {
+    let b = buf(rl);
+    let p = pos(rl);
+    UnicodeSegmentation::grapheme_indices(b, true)
+        .take_while(|(start, _)| *start < p)
+        .count()
+}
+
+/// Display column of the point within its buffer line (segment after
+/// the last `\n`), in terminal cells.
+fn col(rl: &Reedline) -> usize {
+    let b = buf(rl);
+    let p = pos(rl);
+    let seg_start = b[..p].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    UnicodeWidthStr::width(&b[seg_start..p])
+}
+
+/// (current kill-ring slot content, live slot count)
+fn ring(rl: &Reedline) -> (String, usize) {
+    rl.editor.current_kill()
+}
+
+/// The line the incremental history search is currently displaying —
+/// the match the user sees while searching. During a search the
+/// editor buffer itself keeps the pre-search line untouched (that is
+/// what makes abort exact), so the match lives on the history cursor.
+fn search_line(rl: &Reedline) -> Option<String> {
+    rl.history_cursor.string_at_cursor()
+}
+
+/// Assert buffer + byte point in one breath, with the step named so a
+/// failure says *which* link of the chain broke.
+fn expect(rl: &Reedline, step: &str, want_buf: &str, want_pos: usize) {
+    assert_eq!(buf(rl), want_buf, "step `{step}`: buffer");
+    assert_eq!(pos(rl), want_pos, "step `{step}`: insertion point");
+}
+
+fn expect_ring(rl: &Reedline, step: &str, want_slot: &str, want_len: usize) {
+    assert_eq!(
+        ring(rl),
+        (want_slot.to_string(), want_len),
+        "step `{step}`: kill ring (current slot, live slots)"
+    );
+}
+
+// ---------------------------------------------------------------------
+// A. Basic editing chains
+// ---------------------------------------------------------------------
+
+#[test]
+fn chain_basic_insert_move_delete() {
+    let mut rl = new_rl();
+
+    type_str(&mut rl, "helo");
+    expect(&rl, "type helo", "helo", 4);
+
+    // Insert the missing letter in the middle.
+    press(&mut rl, key(KeyCode::Left));
+    expect(&rl, "left", "helo", 3);
+    press(&mut rl, ch('l'));
+    expect(&rl, "insert l", "hello", 4);
+
+    // C-a / C-e are absolute for a single-line buffer.
+    press(&mut rl, ctrl('a'));
+    expect(&rl, "C-a", "hello", 0);
+    press(&mut rl, ctrl('e'));
+    expect(&rl, "C-e", "hello", 5);
+
+    // C-b / C-f step one grapheme and stop at the edges.
+    press(&mut rl, ctrl('b'));
+    expect(&rl, "C-b", "hello", 4);
+    press(&mut rl, ctrl('b'));
+    expect(&rl, "C-b again", "hello", 3);
+    press(&mut rl, ctrl('f'));
+    expect(&rl, "C-f", "hello", 4);
+    press(&mut rl, ctrl('a'));
+    press(&mut rl, ctrl('b'));
+    expect(&rl, "C-b at start is a no-op", "hello", 0);
+    press(&mut rl, ctrl('e'));
+    press(&mut rl, ctrl('f'));
+    expect(&rl, "C-f at end is a no-op", "hello", 5);
+
+    // Backspace deletes before the point; Delete deletes at the point.
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace", "hell", 4);
+    press(&mut rl, ctrl('a'));
+    press(&mut rl, key(KeyCode::Delete));
+    expect(&rl, "delete at start", "ell", 0);
+    press(&mut rl, key(KeyCode::Delete));
+    expect(&rl, "delete again", "ll", 0);
+
+    // Home/End keys agree with C-a/C-e.
+    press(&mut rl, key(KeyCode::End));
+    expect(&rl, "End", "ll", 2);
+    press(&mut rl, key(KeyCode::Home));
+    expect(&rl, "Home", "ll", 0);
+}
+
+#[test]
+fn chain_word_motion_steps() {
+    let mut rl = new_rl();
+    type_str(&mut rl, "foo bar  baz");
+    expect(&rl, "typed", "foo bar  baz", 12);
+
+    // M-b walks word starts: baz -> bar -> foo, then sticks.
+    press(&mut rl, alt('b'));
+    expect(&rl, "M-b to baz", "foo bar  baz", 9);
+    press(&mut rl, alt('b'));
+    expect(&rl, "M-b to bar", "foo bar  baz", 4);
+    press(&mut rl, alt('b'));
+    expect(&rl, "M-b to foo", "foo bar  baz", 0);
+    press(&mut rl, alt('b'));
+    expect(&rl, "M-b sticks at start", "foo bar  baz", 0);
+
+    // M-f walks word ends: foo -> bar -> baz, then sticks.
+    press(&mut rl, alt('f'));
+    expect(&rl, "M-f to end of foo", "foo bar  baz", 3);
+    press(&mut rl, alt('f'));
+    expect(&rl, "M-f to end of bar", "foo bar  baz", 7);
+    press(&mut rl, alt('f'));
+    expect(&rl, "M-f to end of baz", "foo bar  baz", 12);
+    press(&mut rl, alt('f'));
+    expect(&rl, "M-f sticks at end", "foo bar  baz", 12);
+}
+
+// ---------------------------------------------------------------------
+// B. Kill / yank chains (GNU keymap)
+// ---------------------------------------------------------------------
+
+#[test]
+fn chain_kill_line_and_yank_back() {
+    let mut rl = new_rl();
+    type_str(&mut rl, "alpha beta gamma");
+    expect(&rl, "typed", "alpha beta gamma", 16);
+
+    // Mid-line C-k kills to the end of the line only.
+    press(&mut rl, ctrl('a'));
+    for _ in 0..6 {
+        press(&mut rl, ctrl('f'));
+    }
+    expect(&rl, "point after 'alpha '", "alpha beta gamma", 6);
+    press(&mut rl, ctrl('k'));
+    expect(&rl, "C-k mid-line", "alpha ", 6);
+    expect_ring(&rl, "C-k mid-line", "beta gamma", 1);
+
+    // C-y puts it back at the point.
+    press(&mut rl, ctrl('y'));
+    expect(&rl, "C-y restores", "alpha beta gamma", 16);
+
+    // C-a C-k kills the whole line into a fresh slot (the yank in
+    // between broke the kill chain, so no merge with the first slot).
+    press(&mut rl, ctrl('a'));
+    press(&mut rl, ctrl('k'));
+    expect(&rl, "C-k whole line", "", 0);
+    expect_ring(&rl, "C-k whole line", "alpha beta gamma", 2);
+
+    press(&mut rl, ctrl('y'));
+    expect(&rl, "yank whole line", "alpha beta gamma", 16);
+}
+
+#[test]
+fn chain_unix_line_discard_and_yank() {
+    let mut rl = new_rl();
+    type_str(&mut rl, "hello world");
+    press(&mut rl, ctrl('a'));
+    for _ in 0..5 {
+        press(&mut rl, ctrl('f'));
+    }
+    expect(&rl, "point after hello", "hello world", 5);
+
+    // GNU rl_unix_line_discard (kill.c:406): kill from point back to
+    // the start of the line; the suffix after the point survives.
+    press(&mut rl, ctrl('u'));
+    expect(&rl, "C-u", " world", 0);
+    expect_ring(&rl, "C-u", "hello", 1);
+
+    press(&mut rl, ctrl('y'));
+    expect(&rl, "C-y restores prefix", "hello world", 5);
+}
+
+#[test]
+fn chain_unix_word_rubout_merges_backward_kills() {
+    let mut rl = new_rl();
+    type_str(&mut rl, "foo bar baz");
+    expect(&rl, "typed", "foo bar baz", 11);
+
+    // GNU rl_unix_word_rubout (kill.c:307): skip whitespace back, then
+    // kill the non-whitespace run (plus the whitespace skipped over).
+    press(&mut rl, ctrl('w'));
+    expect(&rl, "C-w #1", "foo bar ", 8);
+    expect_ring(&rl, "C-w #1", "baz", 1);
+
+    // Consecutive kills merge into one slot; backward kills prepend,
+    // so the slot rebuilds the original order.
+    press(&mut rl, ctrl('w'));
+    expect(&rl, "C-w #2", "foo ", 4);
+    expect_ring(&rl, "C-w #2 merged", "bar baz", 1);
+
+    press(&mut rl, ctrl('w'));
+    expect(&rl, "C-w #3", "", 0);
+    expect_ring(&rl, "C-w #3 merged", "foo bar baz", 1);
+
+    // One yank restores the whole phrase.
+    press(&mut rl, ctrl('y'));
+    expect(&rl, "C-y", "foo bar baz", 11);
+
+    // C-w at the start of the line is a no-op (GNU dings).
+    press(&mut rl, ctrl('a'));
+    press(&mut rl, ctrl('w'));
+    expect(&rl, "C-w at start no-op", "foo bar baz", 0);
+    expect_ring(&rl, "C-w at start no-op", "foo bar baz", 1);
+}
+
+#[test]
+fn chain_forward_kills_append_and_yank_pop_cycles() {
+    let mut rl = new_rl();
+    type_str(&mut rl, "one two three");
+    press(&mut rl, ctrl('a'));
+    expect(&rl, "at start", "one two three", 0);
+
+    // M-d kills the word ahead; consecutive forward kills append.
+    press(&mut rl, alt('d'));
+    expect(&rl, "M-d #1", " two three", 0);
+    expect_ring(&rl, "M-d #1", "one", 1);
+    press(&mut rl, alt('d'));
+    expect_ring(&rl, "M-d #2 appended", "one two", 1);
+
+    // Break the kill chain with an insertion: the next kill is a
+    // separate slot.
+    press(&mut rl, ch('X'));
+    expect(&rl, "insert X", "X three", 1);
+    press(&mut rl, ctrl('a'));
+    press(&mut rl, ctrl('k'));
+    expect(&rl, "C-k fresh slot", "", 0);
+    expect_ring(&rl, "C-k fresh slot", "X three", 2);
+
+    // A third, separate slot — with only two slots a yank-pop cycle
+    // cannot distinguish walking backward from walking forward, so
+    // the ring must hold three before the pop sequence below means
+    // anything about direction.
+    type_str(&mut rl, "solo");
+    press(&mut rl, ctrl('u'));
+    expect(&rl, "C-u third slot", "", 0);
+    expect_ring(&rl, "C-u third slot", "solo", 3);
+
+    // Yank takes the newest slot; M-y walks back through the ring
+    // and wraps around to the newest again.
+    press(&mut rl, ctrl('y'));
+    expect(&rl, "C-y newest", "solo", 4);
+    press(&mut rl, alt('y'));
+    expect(&rl, "M-y older #1", "X three", 7);
+    press(&mut rl, alt('y'));
+    expect(&rl, "M-y older #2", "one two", 7);
+    press(&mut rl, alt('y'));
+    expect(&rl, "M-y wraps", "solo", 4);
+
+    // M-y without a preceding yank is a no-op.
+    press(&mut rl, ch('!'));
+    expect(&rl, "edit after yank", "solo!", 5);
+    press(&mut rl, alt('y'));
+    expect(&rl, "M-y after edit no-op", "solo!", 5);
+}
+
+#[test]
+fn chain_kill_ring_cap_evicts_oldest() {
+    let mut rl = new_rl();
+
+    // Eleven distinct kills (typing between them breaks the merge
+    // chain): GNU's ring keeps 10 slots and evicts the oldest.
+    for i in 0..11 {
+        type_str(&mut rl, &format!("w{i}"));
+        press(&mut rl, ctrl('u'));
+        assert_eq!(buf(&rl), "", "kill {i} empties the line");
+    }
+    expect_ring(&rl, "after 11 kills", "w10", 10);
+
+    press(&mut rl, ctrl('y'));
+    expect(&rl, "yank newest", "w10", 3);
+    // Nine yank-pops reach the oldest surviving slot: w1 (w0 evicted).
+    for i in (1..=9).rev() {
+        press(&mut rl, alt('y'));
+        assert_eq!(buf(&rl), format!("w{i}"), "yank-pop down to w{i}");
+    }
+    // One more wraps back to the newest.
+    press(&mut rl, alt('y'));
+    expect(&rl, "yank-pop wraps", "w10", 3);
+}
+
+// ---------------------------------------------------------------------
+// C. Undo / redo chains
+// ---------------------------------------------------------------------
+
+#[test]
+fn chain_undo_walks_back_step_by_step() {
+    let mut rl = new_rl();
+
+    // Three discrete edits: paste, kill, yank.
+    paste(&mut rl, "hello world");
+    expect(&rl, "paste", "hello world", 11);
+    press(&mut rl, ctrl('a'));
+    press(&mut rl, alt('d'));
+    expect(&rl, "M-d kills hello", " world", 0);
+    press(&mut rl, ctrl('y'));
+    expect(&rl, "C-y yanks it back", "hello world", 5);
+
+    // Each C-_ peels exactly one edit, newest first, restoring the
+    // point as it was before the undone command (0, after the C-a).
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo yank", " world", 0);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo kill", "hello world", 0);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo paste", "", 0);
+
+    // Undo at the bottom of the stack is a no-op, not a panic.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo exhausted", "", 0);
+}
+
+#[test]
+fn chain_redo_and_new_edit_invalidation() {
+    let mut rl = new_rl();
+
+    paste(&mut rl, "one ");
+    paste(&mut rl, "two");
+    expect(&rl, "two pastes", "one two", 7);
+
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo paste two", "one ", 4);
+
+    // Redo reapplies the undone edit.
+    rl.run_edit_commands(&[EditCommand::Redo]);
+    expect(&rl, "redo paste two", "one two", 7);
+
+    // Undo, then a *new* edit: the redo stack must be invalidated,
+    // so redoing now must not resurrect "two".
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo again", "one ", 4);
+    press(&mut rl, ch('X'));
+    expect(&rl, "new edit", "one X", 5);
+    rl.run_edit_commands(&[EditCommand::Redo]);
+    expect(&rl, "redo after new edit is a no-op", "one X", 5);
+
+    // The undo chain still walks back through the new edit first.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo X", "one ", 4);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo paste one", "", 0);
+}
+
+#[test]
+fn chain_revert_line_clears_fresh_line() {
+    let mut rl = new_rl();
+
+    // On a fresh line, revert-line (M-r) undoes every change made to
+    // the line — back to the empty line editing started from.
+    type_str(&mut rl, "scratch");
+    expect(&rl, "fresh line typed", "scratch", 7);
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r clears fresh line", "", 0);
+
+    // The line is editable again afterwards, and the new edits form
+    // a fresh undo history of their own.
+    type_str(&mut rl, "again");
+    expect(&rl, "retyped", "again", 5);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo retyped", "", 0);
+}
+
+/// DEFECT (isolated, see lane REPORT.md D1): GNU revert-line undoes
+/// the changes made to *this* line, and a recalled history line
+/// starts a fresh undo boundary — recall `git status`, edit it, and
+/// M-r must give back `git status`. The engine instead reverts past
+/// the recall, emptying the line: the recall itself sits on the
+/// line's undo stack. Kept as the regression seed; do not bend the
+/// expectations to the current behaviour.
+#[test]
+#[ignore = "defect D1: revert-line crosses the history-recall boundary"]
+fn chain_revert_line_restores_recalled_history() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    type_str(&mut rl, " -s");
+    press(&mut rl, ctrl('a'));
+    type_str(&mut rl, "x");
+    expect(&rl, "edited recall", "xgit status -s", 1);
+
+    // GNU revert-line (undo.c:331), M-r: every change to the recalled
+    // line is undone in one step.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r reverts", "git status", 10);
+}
+
+// ---------------------------------------------------------------------
+// D. Reverse incremental search (C-r) chains
+// ---------------------------------------------------------------------
+
+#[test]
+fn chain_isearch_narrows_per_keystroke() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["alpha one", "beta two", "alpha three"]);
+
+    press(&mut rl, ctrl('r'));
+    assert_eq!(rl.input_mode, InputMode::HistorySearch, "C-r enters search");
+
+    // Each typed char re-searches: the displayed match is the newest
+    // entry matching the needle so far, step by step — while the
+    // editor buffer keeps the pre-search (empty) line untouched.
+    press(&mut rl, ch('a'));
+    assert_eq!(search_line(&rl), Some("alpha three".into()), "needle 'a'");
+    expect(&rl, "buffer untouched by search", "", 0);
+    assert_eq!(rl.input_mode, InputMode::HistorySearch);
+    press(&mut rl, ch('l'));
+    assert_eq!(search_line(&rl), Some("alpha three".into()), "needle 'al'");
+    press(&mut rl, ch('p'));
+    assert_eq!(search_line(&rl), Some("alpha three".into()), "needle 'alp'");
+    press(&mut rl, ch('h'));
+    assert_eq!(
+        search_line(&rl),
+        Some("alpha three".into()),
+        "needle 'alph'"
+    );
+    press(&mut rl, ch('a'));
+    assert_eq!(
+        search_line(&rl),
+        Some("alpha three".into()),
+        "needle 'alpha'"
+    );
+
+    // C-r again walks to the next older match; a third C-r finds no
+    // older match and stays put (still in search mode).
+    press(&mut rl, ctrl('r'));
+    assert_eq!(
+        search_line(&rl),
+        Some("alpha one".into()),
+        "C-r to older match"
+    );
+    press(&mut rl, ctrl('r'));
+    assert_eq!(
+        search_line(&rl),
+        Some("alpha one".into()),
+        "C-r exhausted stays"
+    );
+    assert_eq!(rl.input_mode, InputMode::HistorySearch);
+
+    // Accepting lands on the found entry: point at the match start
+    // (GNU _rl_isearch_fini), mode back to regular.
+    press(&mut rl, key(KeyCode::Enter));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Enter accepts search");
+    expect(&rl, "accepted line", "alpha one", 0);
+}
+
+/// DEFECT (isolated, see lane REPORT.md D4): after an isearch is
+/// accepted, the history cursor is left desynced — GNU positions
+/// you *on* the found entry, so Up/Down step to its neighbours.
+/// Here Up from the accepted middle entry jumps to a NEWER entry,
+/// Down can leave the buffer showing an entry the cursor no longer
+/// reports, and accepting the newest entry wedges navigation
+/// entirely. Kept as the regression seed with the GNU expectation.
+#[test]
+#[ignore = "defect D4: history navigation is desynced after isearch accept"]
+fn chain_isearch_accept_positions_history_cursor() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["alpha one", "beta two", "alpha three"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "beta");
+    press(&mut rl, key(KeyCode::Enter));
+    expect(&rl, "accepted middle entry", "beta two", 0);
+
+    // Plain adjacent stepping from the found entry, point at the
+    // end of each recalled line.
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "Down to newer neighbour", "alpha three", 11);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "Up back to found entry", "beta two", 8);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "Up to older neighbour", "alpha one", 9);
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "Down again", "beta two", 8);
+}
+
+#[test]
+fn chain_isearch_abort_restores_original_line() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    type_str(&mut rl, "draft");
+    expect(&rl, "typed draft", "draft", 5);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "beta");
+    assert_eq!(search_line(&rl), Some("beta two".into()), "searching beta");
+    expect(&rl, "original line preserved", "draft", 5);
+    assert_eq!(rl.input_mode, InputMode::HistorySearch);
+
+    // C-g aborts: the line being edited before the search comes back
+    // verbatim, point included.
+    press(&mut rl, ctrl('g'));
+    assert_eq!(rl.input_mode, InputMode::Regular, "C-g leaves search");
+    expect(&rl, "abort restores draft", "draft", 5);
+}
+
+/// DEFECT (isolated, see lane REPORT.md D5): GNU's dispatch
+/// finalizes the search first — found line in the buffer, point at
+/// the match start — and *then* executes the pending command on
+/// it. The engine's fallback (`run_history_commands`) flips to
+/// regular mode and runs the command against the pre-search buffer
+/// without finalizing; the found line is restored afterwards by
+/// the buffer sync, so the command's effect is silently discarded
+/// (C-e here leaves the point at 0 instead of the line end).
+/// Kept as the regression seed with the GNU expectation.
+#[test]
+#[ignore = "defect D5: isearch exit-and-execute runs the command on the pre-search buffer, discarding it"]
+fn chain_isearch_command_key_exits_and_executes() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("gamma three".into()),
+        "searching gamma"
+    );
+
+    // GNU isearch dispatch (isearch.c:513-524): a base-keymap
+    // command key terminates the search — keeping the found line —
+    // and then executes as a command on it. C-e lands the point at
+    // the match start on finalize, then itself moves to line end.
+    press(&mut rl, ctrl('e'));
+    assert_eq!(rl.input_mode, InputMode::Regular, "C-e leaves search");
+    expect(&rl, "found line kept, C-e executed", "gamma three", 11);
+
+    // And it is an ordinary line now: editing continues on it.
+    type_str(&mut rl, " --verbose");
+    expect(&rl, "edit after exit", "gamma three --verbose", 21);
+}
+
+/// DEFECT (isolated, see lane REPORT.md D2): in GNU, Esc is a
+/// default member of `isearch-terminators` (isearch.c:529-532,
+/// "\033\012") — it terminates the search *keeping the found line*;
+/// only C-g (rl_abort) restores the pre-search line. The engine
+/// dispatches abort on the Esc event, so Esc throws the found line
+/// away exactly like C-g. Kept as the regression seed with the GNU
+/// expectation; do not bend it to the current behaviour.
+#[test]
+#[ignore = "defect D2: Esc aborts isearch instead of terminating it, discarding the found line"]
+fn chain_isearch_escape_keeps_found_line() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("gamma three".into()),
+        "searching gamma"
+    );
+
+    // Esc terminates the search and keeps the found line for editing.
+    press(&mut rl, key(KeyCode::Esc));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Esc leaves search");
+    expect(&rl, "found line kept", "gamma three", 11);
+
+    // And it is an ordinary line now: editing continues on it.
+    type_str(&mut rl, " --verbose");
+    expect(&rl, "edit after Esc", "gamma three --verbose", 21);
+}
+
+#[test]
+fn chain_isearch_failed_needle_recovers_on_backspace() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["alpha one", "beta two"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "beta");
+    assert_eq!(search_line(&rl), Some("beta two".into()), "needle beta");
+
+    // Extending the needle past every match fails the search but
+    // does not leave it: the mode and the needle survive.
+    press(&mut rl, ch('x'));
+    assert_eq!(rl.input_mode, InputMode::HistorySearch, "still searching");
+    assert_eq!(
+        rl.history_cursor.get_navigation(),
+        HistoryNavigationQuery::SubstringSearch("betax".into()),
+        "needle records the failed extension"
+    );
+    press(&mut rl, ch('y'));
+    assert_eq!(rl.input_mode, InputMode::HistorySearch, "still searching");
+
+    // Deleting needle chars re-searches and recovers the match.
+    press(&mut rl, key(KeyCode::Backspace));
+    press(&mut rl, key(KeyCode::Backspace));
+    assert_eq!(
+        search_line(&rl),
+        Some("beta two".into()),
+        "needle back to beta"
+    );
+
+    press(&mut rl, ctrl('g'));
+    expect(&rl, "abort to empty line", "", 0);
+    assert_eq!(rl.input_mode, InputMode::Regular);
+}
+
+/// DEFECT (isolated, see lane REPORT.md D3): when an isearch needle
+/// stops matching, GNU keeps the last successful match on the line
+/// and only flags the prompt as failed. The engine drops the match:
+/// the history cursor loses its entry, and the painter renders an
+/// empty line (`string_at_cursor().unwrap_or_default()` in
+/// `history_search_paint`). Kept as the regression seed with the
+/// GNU expectation.
+#[test]
+#[ignore = "defect D3: a failed isearch needle drops the last match instead of displaying it"]
+fn chain_isearch_failed_needle_keeps_last_match() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["alpha one", "beta two"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "beta");
+    assert_eq!(search_line(&rl), Some("beta two".into()), "needle beta");
+
+    press(&mut rl, ch('x'));
+    assert_eq!(
+        search_line(&rl),
+        Some("beta two".into()),
+        "needle betax failed keeps last match"
+    );
+    assert_eq!(rl.input_mode, InputMode::HistorySearch);
+    press(&mut rl, ch('y'));
+    assert_eq!(
+        search_line(&rl),
+        Some("beta two".into()),
+        "needle betaxy failed keeps last match"
+    );
+}
+
+// ---------------------------------------------------------------------
+// E. Multi-line chains
+// ---------------------------------------------------------------------
+
+/// Engine with the crate's `DefaultValidator` wired the way a host
+/// wires it: an unbalanced quote or bracket makes Enter continue the
+/// line instead of submitting it.
+fn new_rl_validated() -> Reedline {
+    let mut rl = Reedline::create()
+        .with_edit_mode(Box::<Emacs>::default())
+        .with_validator(Box::new(crate::DefaultValidator));
+    rl.painter.force_prompt_anchored_for_test(0);
+    rl
+}
+
+#[test]
+fn chain_continuation_via_unclosed_quote() {
+    let mut rl = new_rl_validated();
+
+    type_str(&mut rl, "echo \"abc");
+    expect(&rl, "typed open quote", "echo \"abc", 9);
+
+    // Enter on an incomplete line inserts a newline; nothing submits.
+    let flow = press_flow(&mut rl, key(KeyCode::Enter));
+    assert!(
+        matches!(flow, ControlFlow::Continue(())),
+        "unclosed quote must continue, not submit"
+    );
+    expect(&rl, "continuation line", "echo \"abc\n", 10);
+
+    type_str(&mut rl, "def\"");
+    expect(&rl, "closing quote typed", "echo \"abc\ndef\"", 14);
+
+    // Now the line validates complete and Enter submits it whole.
+    let flow = press_flow(&mut rl, key(KeyCode::Enter));
+    match flow {
+        ControlFlow::Break(Signal::Success(line)) => {
+            assert_eq!(line, "echo \"abc\ndef\"");
+        }
+        other => panic!("expected submit of the full two-line buffer, got {other:?}"),
+    }
+}
+
+#[test]
+fn chain_continuation_via_unclosed_bracket() {
+    let mut rl = new_rl_validated();
+
+    type_str(&mut rl, "echo (abc");
+    let flow = press_flow(&mut rl, key(KeyCode::Enter));
+    assert!(matches!(flow, ControlFlow::Continue(())));
+    expect(&rl, "bracket continuation", "echo (abc\n", 10);
+
+    type_str(&mut rl, "def)");
+    let flow = press_flow(&mut rl, key(KeyCode::Enter));
+    match flow {
+        ControlFlow::Break(Signal::Success(line)) => {
+            assert_eq!(line, "echo (abc\ndef)");
+        }
+        other => panic!("expected submit after closing bracket, got {other:?}"),
+    }
+}
+
+/// Build "one\ntwo\nthree" via Alt+Enter line breaks.
+fn three_line_rl() -> Reedline {
+    let mut rl = new_rl();
+    type_str(&mut rl, "one");
+    press(&mut rl, alt_key(KeyCode::Enter));
+    type_str(&mut rl, "two");
+    press(&mut rl, alt_key(KeyCode::Enter));
+    type_str(&mut rl, "three");
+    expect(&rl, "three lines built", "one\ntwo\nthree", 13);
+    rl
+}
+
+#[test]
+fn chain_multiline_navigation() {
+    let mut rl = three_line_rl();
+    seed_history(&mut rl, &["old cmd"]);
+
+    // C-a / C-e are line-segment local in a multi-line buffer (GNU
+    // rl_beginning_of_line works on the current line of the buffer).
+    press(&mut rl, ctrl('a'));
+    expect(&rl, "C-a to segment start", "one\ntwo\nthree", 8);
+    press(&mut rl, ctrl('e'));
+    expect(&rl, "C-e to segment end", "one\ntwo\nthree", 13);
+
+    // Up walks buffer lines first, keeping the goal column where the
+    // target line is long enough and clamping where it is not.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "Up to line 2 (clamped)", "one\ntwo\nthree", 7);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "Up to line 1", "one\ntwo\nthree", 3);
+
+    // Up on the first buffer line leaves the buffer for history.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "Up into history", "old cmd", 7);
+
+    // Down returns to the live multi-line buffer. The saved line
+    // carries no point of its own (GNU's saved line is text-only),
+    // so the point lands at the end of the restored buffer.
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "Down back to live line", "one\ntwo\nthree", 13);
+}
+
+#[test]
+fn chain_multiline_kills() {
+    let mut rl = three_line_rl();
+
+    // GNU rl_unix_line_discard kills from the point to the start of
+    // the *buffer* (kill.c:406 calls rl_kill_text(rl_point, 0)), so
+    // C-u on line 3 swallows lines 1-2 and the newline before point.
+    press(&mut rl, ctrl('a'));
+    expect(&rl, "C-a segment start", "one\ntwo\nthree", 8);
+    press(&mut rl, ctrl('u'));
+    expect(&rl, "C-u across lines", "three", 0);
+    expect_ring(&rl, "C-u across lines", "one\ntwo\n", 1);
+    press(&mut rl, ctrl('y'));
+    expect(&rl, "yank restores all", "one\ntwo\nthree", 8);
+
+    // C-k inside line 1 kills to that segment's end only (GNU
+    // rl_kill_line first moves to the end of the current line).
+    // From the segment-3 start (goal column 0), Up walks to the
+    // start of each segment above.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "Up to line 2 start", "one\ntwo\nthree", 4);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "Up to line 1 start", "one\ntwo\nthree", 0);
+    press(&mut rl, ctrl('f'));
+    expect(&rl, "point mid line 1", "one\ntwo\nthree", 1);
+    press(&mut rl, ctrl('k'));
+    expect(&rl, "C-k segment-local", "o\ntwo\nthree", 1);
+    expect_ring(&rl, "C-k segment-local", "ne", 2);
+
+    // Backspace at a segment start joins the lines.
+    press(&mut rl, ctrl('e'));
+    expect(&rl, "C-e at segment end", "o\ntwo\nthree", 1);
+    press(&mut rl, ctrl('f'));
+    expect(&rl, "start of line 2", "o\ntwo\nthree", 2);
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace joins lines", "otwo\nthree", 1);
+}
+
+// ---------------------------------------------------------------------
+// F. Wide-character chains
+// ---------------------------------------------------------------------
+
+#[test]
+fn chain_wide_char_insert_move_delete() {
+    let mut rl = new_rl();
+
+    press(&mut rl, ch('a'));
+    expect(&rl, "type a", "a", 1);
+    press(&mut rl, ch('你'));
+    expect(&rl, "type CJK", "a你", 4);
+    assert_eq!(gpos(&rl), 2, "two graphemes after a+CJK");
+    assert_eq!(col(&rl), 3, "a (1 cell) + CJK (2 cells)");
+    press(&mut rl, ch('b'));
+    expect(&rl, "type b", "a你b", 5);
+    assert_eq!(gpos(&rl), 3);
+
+    // C-b steps over the whole 3-byte grapheme, never into its bytes.
+    press(&mut rl, ctrl('b'));
+    expect(&rl, "C-b over b", "a你b", 4);
+    press(&mut rl, ctrl('b'));
+    expect(&rl, "C-b over CJK", "a你b", 1);
+    assert_eq!(gpos(&rl), 1);
+    press(&mut rl, ctrl('f'));
+    expect(&rl, "C-f over CJK", "a你b", 4);
+
+    // Backspace removes the CJK char as one unit.
+    press(&mut rl, ctrl('e'));
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace b", "a你", 4);
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace CJK whole", "a", 1);
+    assert_eq!(gpos(&rl), 1);
+    assert_eq!(col(&rl), 1);
+}
+
+#[test]
+fn chain_emoji_and_zwj_cluster_move_as_one() {
+    let mut rl = new_rl();
+
+    press(&mut rl, ch('😊'));
+    expect(&rl, "type emoji", "😊", 4);
+    assert_eq!(gpos(&rl), 1, "emoji is one grapheme");
+    assert_eq!(col(&rl), 2, "emoji is two cells wide");
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace emoji whole", "", 0);
+
+    // A ZWJ sequence is a single grapheme cluster in this editor's
+    // grapheme model: 17 bytes, one motion step, one backspace.
+    let cluster = "🤦🏼‍♂️";
+    assert_eq!(cluster.len(), 17, "fixture: cluster byte length");
+    type_str(&mut rl, cluster);
+    expect(&rl, "type ZWJ cluster", cluster, 17);
+    assert_eq!(gpos(&rl), 1, "ZWJ cluster is one grapheme");
+    assert_eq!(col(&rl), 2, "ZWJ cluster renders two cells wide");
+
+    press(&mut rl, ctrl('b'));
+    expect(&rl, "C-b over whole cluster", cluster, 0);
+    press(&mut rl, ctrl('f'));
+    expect(&rl, "C-f over whole cluster", cluster, 17);
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace removes whole cluster", "", 0);
+}
+
+#[test]
+fn chain_mixed_script_word_motion() {
+    let mut rl = new_rl();
+    // "你好 world": CJK letters form a word run just like Latin ones.
+    // (3 + 3 + 1 + 5 = 12 bytes.)
+    type_str(&mut rl, "你好 world");
+    expect(&rl, "typed mixed", "你好 world", 12);
+
+    press(&mut rl, alt('b'));
+    expect(&rl, "M-b to world", "你好 world", 7);
+    press(&mut rl, alt('b'));
+    expect(&rl, "M-b to start", "你好 world", 0);
+    press(&mut rl, alt('f'));
+    expect(&rl, "M-f over CJK word", "你好 world", 6);
+    press(&mut rl, alt('f'));
+    expect(&rl, "M-f to end", "你好 world", 12);
+}
+
+// ---------------------------------------------------------------------
+// G. Bracketed-paste chains
+// ---------------------------------------------------------------------
+
+#[test]
+fn chain_paste_multiline_does_not_submit() {
+    let mut rl = new_rl();
+
+    // Bracketed paste inserts embedded newlines literally: no line
+    // may execute on the way in, not even the trailing newline.
+    let flow = paste_flow(&mut rl, "echo one\necho two\n");
+    assert!(
+        matches!(flow, ControlFlow::Continue(())),
+        "paste must never submit"
+    );
+    expect(&rl, "pasted two lines", "echo one\necho two\n", 18);
+
+    // It is an ordinary buffer afterwards.
+    type_str(&mut rl, "echo three");
+    expect(
+        &rl,
+        "typing after paste",
+        "echo one\necho two\necho three",
+        28,
+    );
+
+    let flow = press_flow(&mut rl, key(KeyCode::Enter));
+    match flow {
+        ControlFlow::Break(Signal::Success(line)) => {
+            assert_eq!(line, "echo one\necho two\necho three");
+        }
+        other => panic!("expected one submit of the pasted buffer, got {other:?}"),
+    }
+}
+
+#[test]
+fn chain_paste_is_one_undo_unit() {
+    let mut rl = new_rl();
+
+    type_str(&mut rl, "x");
+    paste(&mut rl, "line1\nline2");
+    expect(&rl, "paste after x", "xline1\nline2", 12);
+
+    // One undo removes the entire paste, however many lines it had.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "one undo removes paste", "x", 1);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "second undo removes x", "", 0);
+
+    rl.run_edit_commands(&[EditCommand::Redo]);
+    expect(&rl, "redo x", "x", 1);
+    rl.run_edit_commands(&[EditCommand::Redo]);
+    expect(&rl, "redo paste whole", "xline1\nline2", 12);
+}
+
+#[test]
+fn chain_paste_verbatim_with_auto_pairs() {
+    let mut rl = new_rl_with_pairs(&[('(', ')')]);
+
+    type_str(&mut rl, "echo ");
+    // Pasted text is never rewritten by auto-pairs: no closing paren
+    // is invented for the pasted opener.
+    paste(&mut rl, "(a");
+    expect(&rl, "pasted opener verbatim", "echo (a", 7);
+
+    // A *typed* closer afterwards is just a character here (the next
+    // char is not a paired closer to overtype).
+    press(&mut rl, ch(')'));
+    expect(&rl, "typed closer", "echo (a)", 8);
+}
+
+// ---------------------------------------------------------------------
+// H. Editing inside quotes and brackets
+// ---------------------------------------------------------------------
+
+#[test]
+fn chain_auto_pair_insert_overtype_delete() {
+    let mut rl = new_rl_with_pairs(&[('(', ')'), ('"', '"'), ('[', ']')]);
+
+    press(&mut rl, ch('('));
+    expect(&rl, "open paren pairs", "()", 1);
+    press(&mut rl, ch('x'));
+    expect(&rl, "type inside pair", "(x)", 2);
+    // Typing the closer overtypes the auto-inserted one.
+    press(&mut rl, ch(')'));
+    expect(&rl, "overtype closer", "(x)", 3);
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace closer", "(x", 2);
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace x", "(", 1);
+
+    // A fresh opener inside the remains of the earlier pair inserts
+    // its own pair (the outer closer was already deleted above, so
+    // the buffer is the lone "(" plus the new "()").
+    press(&mut rl, ch('('));
+    expect(&rl, "nested open", "(()", 2);
+    // Backspace inside that empty inner pair removes both sides.
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace empty pair", "(", 1);
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "backspace lone opener", "", 0);
+
+    // Quotes pair the same way, and the closer overtypes.
+    press(&mut rl, ch('"'));
+    expect(&rl, "open quote pairs", "\"\"", 1);
+    press(&mut rl, ch('a'));
+    expect(&rl, "type inside quotes", "\"a\"", 2);
+    press(&mut rl, ch('"'));
+    expect(&rl, "overtype quote", "\"a\"", 3);
+}
+
+#[test]
+fn chain_edit_inside_quotes() {
+    let mut rl = new_rl();
+
+    type_str(&mut rl, "echo \"hello world\"");
+    expect(&rl, "typed quoted", "echo \"hello world\"", 18);
+
+    // Word motion inside the quotes treats the quote as a boundary.
+    press(&mut rl, ctrl('b'));
+    expect(&rl, "step inside closing quote", "echo \"hello world\"", 17);
+    press(&mut rl, alt('b'));
+    expect(&rl, "M-b to world start", "echo \"hello world\"", 12);
+    press(&mut rl, alt('b'));
+    expect(&rl, "M-b to hello start", "echo \"hello world\"", 6);
+
+    type_str(&mut rl, "say ");
+    expect(&rl, "insert inside quotes", "echo \"say hello world\"", 10);
+
+    // Kill the word I just landed in the middle of: point sits right
+    // before "hello"; M-d removes it, leaving the rest of the string.
+    press(&mut rl, alt('d'));
+    expect(&rl, "M-d inside quotes", "echo \"say  world\"", 10);
+    expect_ring(&rl, "M-d inside quotes", "hello", 1);
+}
+
+#[test]
+fn chain_transpose_chars() {
+    let mut rl = new_rl();
+    type_str(&mut rl, "ab");
+    expect(&rl, "typed ab", "ab", 2);
+
+    // GNU rl_transpose_chars at end of line swaps the last two chars.
+    press(&mut rl, ctrl('t'));
+    expect(&rl, "C-t at end", "ba", 2);
+    press(&mut rl, ctrl('t'));
+    expect(&rl, "C-t again swaps back", "ab", 2);
+
+    // Mid-line, C-t swaps the chars around the point and moves past.
+    press(&mut rl, ctrl('a'));
+    press(&mut rl, ctrl('f'));
+    expect(&rl, "point between a and b", "ab", 1);
+    press(&mut rl, ctrl('t'));
+    expect(&rl, "C-t mid-line", "ba", 2);
+}
+
+// TEMPORARY PROBE (not part of the suite): does a bare undo after a
+// history recall cross the recall boundary too?
