@@ -543,7 +543,7 @@ fn chain_isearch_narrows_per_keystroke() {
     assert_eq!(
         search_line(&rl),
         Some("alpha three".into()),
-        "needle 'alph'"
+        "needle after four chars"
     );
     press(&mut rl, ch('a'));
     assert_eq!(
