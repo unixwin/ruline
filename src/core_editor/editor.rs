@@ -1125,6 +1125,22 @@ impl Editor {
             self.insert_undo_run = 0;
             return;
         }
+        if matches!(undo_behavior, UndoBehavior::HistoryNavigation) {
+            // Every history landing funnels through here with the
+            // landed text already in the line buffer (the callers set
+            // the buffer first). GNU installs the fetched entry's own
+            // undo list at that moment (misc.c
+            // `rl_replace_from_history` — `rl_undo_list =
+            // entry->data`, empty for an entry not edited this
+            // session), so the landing is not an edit to record but a
+            // boundary to restart the stack at: undo and revert-line
+            // stop at the recalled text and can never cross into the
+            // line that was live before traversal (issue #53).
+            self.edit_stack.restart_at(self.line_buffer.clone());
+            self.last_undo_behavior = UndoBehavior::HistoryNavigation;
+            self.insert_undo_run = 0;
+            return;
+        }
         // GNU's insert cap (text.c:110): a single-char insert concatenates
         // into the open UNDO_INSERT entry only while that entry holds
         // fewer than 20 chars — at 20 the entry closes and this insert
