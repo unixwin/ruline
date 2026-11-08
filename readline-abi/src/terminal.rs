@@ -1424,7 +1424,10 @@ mod tests {
 
     #[test]
     fn pending_input_clear_drops_the_state_bit() {
-        // SAFETY: single test process global; no concurrent readers here.
+        // Pending input and the state word belong to the process-global
+        // input complex (ruline#28): serialize against the macros tests.
+        let _input_state = state::input_state_test_lock();
+        // SAFETY: the lock above excludes concurrent readers here.
         unsafe { rl_clear_pending_input() };
         state::set_pending_input('x' as c_int);
         add_state(RL_STATE_INPUTPENDING);

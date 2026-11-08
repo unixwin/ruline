@@ -114,6 +114,25 @@ pub(crate) static mut SAVED_PROMPT: *mut c_char = ptr::null_mut();
 pub(crate) static mut SAVED_DISPLAY_PROMPT: *mut c_char = ptr::null_mut();
 pub(crate) static mut PROMPT_IS_SAVED: bool = false;
 
+/// Serializes tests that drive the process-global input state.
+///
+/// The exported globals in this module, the executing-macro stack in
+/// `crate::macros`, and the stuffed-character queue in `crate::terminal`
+/// form one singleton input complex: the C ABI has exactly one of each,
+/// mirroring GNU readline.  `cargo test` runs unit tests on parallel
+/// threads inside one process, so two tests that reset and replay macro
+/// input at the same time interleave — one test's reset frees the macro
+/// string another test is still reading, and the reader observes the
+/// other test's bytes.  Under workspace-parallel load that made the
+/// macros tests fail intermittently (ruline#28).  A test that touches
+/// this complex holds the lock returned here for its whole body.
+#[cfg(test)]
+pub(crate) fn input_state_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // --- Scalar accessors -----------------------------------------------------
 
 macro_rules! scalar_accessors {
