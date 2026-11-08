@@ -1,5 +1,5 @@
 use crate::{
-    enums::{EventStatus, ReedlineEvent, ReedlineRawEvent},
+    enums::{EditCommand, EventStatus, ReedlineEvent, ReedlineRawEvent},
     PromptEditMode,
 };
 
@@ -43,6 +43,26 @@ pub trait EditMode: Send {
     fn handle_mode_specific_event(&mut self, _event: ReedlineEvent) -> EventStatus {
         EventStatus::Inapplicable
     }
+
+    /// Told how an [`ReedlineEvent::Edit`] the engine just executed came
+    /// out, so a mode whose parse-time state was staked on the edit
+    /// applying can settle the stake. Vi's operator layer is the
+    /// motivating case: it enters insert mode for `c<motion>` while
+    /// parsing, before the motion is evaluated against the buffer; when
+    /// the motion fails, the operator is cancelled in GNU (`rl_vi_domove`
+    /// returning -1, vi_mode.c:1385-1396) and the insert entry has to be
+    /// revoked, which only this report can trigger.
+    ///
+    /// `commands` are the commands that were run (after any engine
+    /// rewriting) and `status` is their aggregate outcome. The report is
+    /// a notification, not a query: it arrives after the fact, for every
+    /// executed edit batch — including batches the mode did not author
+    /// (host bindings, menu edits) — so a mode that cares must match the
+    /// report against its own outstanding stake and ignore the rest.
+    ///
+    /// The default ignores the report, which suits modes whose state
+    /// never depends on an edit's outcome.
+    fn note_edit_outcome(&mut self, _commands: &[EditCommand], _status: EventStatus) {}
 
     /// Whether the mode is holding a half-typed multi-key sequence.
     ///

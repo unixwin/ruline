@@ -3904,6 +3904,19 @@ impl Reedline {
 
                 let status = self.run_edit_commands_with_status(&commands);
 
+                // The mode machine may have staked parse-time state on
+                // this edit (vi's operator layer enters insert for
+                // `c<motion>` before the motion is evaluated); report the
+                // outcome so it can settle the stake.
+                self.edit_mode.note_edit_outcome(
+                    &commands,
+                    if status == EditCommandStatus::Applied {
+                        EventStatus::Handled
+                    } else {
+                        EventStatus::Inapplicable
+                    },
+                );
+
                 // Ahead of everything below, which would otherwise ask a
                 // completer about a word the user has already left, or return
                 // through the abbreviation expansion without ever looking.
