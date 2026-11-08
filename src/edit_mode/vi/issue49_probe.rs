@@ -172,10 +172,19 @@ fn issue49_a_session_ended_by_enter_still_folds_into_the_dot_action() {
     d.new_line("one two three", 0);
     // The next line starts in insert, as a fresh vi line does.
     assert_eq!(d.mode(), ViMode::Insert);
+    // The fold already happened at Enter: no capture may still be
+    // live on the new line. (Before the fix it is, and the Esc below
+    // folds it late instead — the defect this pin exists to catch.)
+    assert!(d.vi.insert_capture.is_none());
+    // Typing on the new line is a different session; it must not
+    // contaminate the action recorded for the submitted one.
+    d.keys("Y");
+    assert_eq!(d.state().0, "Yone two three");
     d.esc();
     assert_eq!(d.mode(), ViMode::Normal);
     // `.` replays the change *and* its text, even though the session
-    // was submitted rather than escaped.
+    // was submitted rather than escaped — with exactly the submitted
+    // session's net text ("X"), not "XY".
     d.keys(".");
     assert_eq!(d.state().0, "X two three");
 }
