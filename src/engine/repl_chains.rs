@@ -1261,6 +1261,14 @@ fn chain_undo_on_draft_line_survives_history_roundtrip() {
     paste(&mut rl, "two");
     expect(&rl, "draft second paste", "one two", 7);
 
+    // Enter the walk with the point off the end of the line: plain
+    // Up on a non-empty line whose point sits at the end is this
+    // engine's prefix search by design (see
+    // `get_history_navigation_based_on_line_buffer`), which is not
+    // what this chain pins — the saved-line undo restore is.
+    press(&mut rl, ctrl('a'));
+    expect(&rl, "draft point to start", "one two", 0);
+
     // Traversal starts: GNU saves the draft line and its undo list
     // as the saved line. Walking back down restores both.
     press(&mut rl, key(KeyCode::Up));
@@ -1286,6 +1294,11 @@ fn chain_end_of_history_restores_draft_and_its_undo_list() {
     paste(&mut rl, "one ");
     paste(&mut rl, "two");
     expect(&rl, "draft typed", "one two", 7);
+
+    // Point off the end, as in the round-trip chain above, so the
+    // walk below is a plain walk and not a prefix search.
+    press(&mut rl, ctrl('a'));
+    expect(&rl, "draft point to start", "one two", 0);
 
     press(&mut rl, key(KeyCode::Up));
     expect(&rl, "recall newest", "second entry", 12);
