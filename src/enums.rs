@@ -1232,6 +1232,11 @@ pub enum UndoBehavior {
     /// Move the cursor position
     MoveCursor,
     /// Navigated the history using up or down arrows
+    ///
+    /// Not an edit to record: the landing restarts the undo stack at
+    /// the fetched entry, whose own undo list is what GNU installs on
+    /// recall (misc.c `rl_replace_from_history`), so undo and
+    /// revert-line stop at the recalled text (issue #53).
     HistoryNavigation,
     /// Catch-all for actions that should always form a unique undo point and never be
     /// grouped with later edits

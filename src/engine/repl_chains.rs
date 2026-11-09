@@ -489,15 +489,15 @@ fn chain_revert_line_clears_fresh_line() {
     expect(&rl, "undo retyped", "", 0);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D1): GNU revert-line undoes
-/// the changes made to *this* line, and a recalled history line
-/// starts a fresh undo boundary — recall `git status`, edit it, and
-/// M-r must give back `git status`. The engine instead reverts past
-/// the recall, emptying the line: the recall itself sits on the
-/// line's undo stack. Kept as the regression seed; do not bend the
-/// expectations to the current behaviour.
+/// GNU revert-line undoes the changes made to *this* line, and a
+/// recalled history line starts a fresh undo boundary: fetching an
+/// entry installs that entry's own undo list (misc.c
+/// `rl_replace_from_history` — `rl_undo_list = entry->data`, empty
+/// for an entry not edited this session), so undo and revert-line
+/// can never cross the recall into the line that was live before
+/// traversal. Recall `git status`, edit it, and M-r must give back
+/// `git status` (issue #53).
 #[test]
-#[ignore = "defect D1: revert-line crosses the history-recall boundary"]
 fn chain_revert_line_restores_recalled_history() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["git status"]);
@@ -514,6 +514,102 @@ fn chain_revert_line_restores_recalled_history() {
     // line is undone in one step.
     press(&mut rl, alt('r'));
     expect(&rl, "M-r reverts", "git status", 10);
+}
+
+#[test]
+fn chain_undo_and_revert_on_untouched_recall_are_noops() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    // The recalled line carries an empty undo list (misc.c
+    // `rl_replace_from_history`): C-_ right after the recall has
+    // nothing to undo and must not touch the line — the recall
+    // itself is not an undoable edit.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo on untouched recall is a no-op", "git status", 10);
+
+    // Same for revert-line on the untouched recall.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r on untouched recall is a no-op", "git status", 10);
+}
+
+#[test]
+fn chain_undo_stops_at_recall_boundary() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    type_str(&mut rl, " -s");
+    press(&mut rl, ctrl('a'));
+    type_str(&mut rl, "x");
+    expect(&rl, "edited recall", "xgit status -s", 1);
+
+    // Undo walks the edits made *since* the recall, newest first,
+    // and stops at the recalled text: the boundary is the floor.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo x", "git status -s", 0);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo suffix", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo at boundary is a no-op", "git status", 10);
+}
+
+#[test]
+fn chain_revert_line_stops_at_each_recall_hop() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status", "git diff"]);
+
+    // Each traversal hop lands on an entry with its own undo
+    // boundary: editing the older entry and reverting gives back
+    // that entry, not the newer one visited in between.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "git diff", 8);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older", "git status", 10);
+
+    type_str(&mut rl, " -s");
+    expect(&rl, "edited older entry", "git status -s", 13);
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r reverts to this hop's entry", "git status", 10);
+}
+
+#[test]
+fn chain_undo_stops_at_recall_boundary_after_typed_prefix() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    // Type on the live line first, so the pre-recall undo stack is
+    // non-empty when the recall lands (the chains above all recall
+    // from an empty line, where the boundary clear is unobservable).
+    // With a non-empty buffer and the cursor at its end, Up runs a
+    // prefix search on the typed text, so the typed text is a prefix
+    // of the seeded entry; the landing still routes through the same
+    // history-navigation throat.
+    type_str(&mut rl, "git");
+    expect(&rl, "typed live line", "git", 3);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    // Edit the recalled line, then undo repeatedly: undo stops at
+    // the recalled text and never crosses into the pre-recall "git".
+    type_str(&mut rl, "!");
+    expect(&rl, "edited recall", "git status!", 11);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo edit", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo at floor is a no-op", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo still at floor", "git status", 10);
+
+    // Revert-line likewise stops at the floor.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r at floor is a no-op", "git status", 10);
 }
 
 // ---------------------------------------------------------------------
