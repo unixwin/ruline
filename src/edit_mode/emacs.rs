@@ -63,10 +63,12 @@ pub fn default_emacs_keybindings() -> Keybindings {
     // abort`; the same slot sits in the vi-command map (`bind -m
     // vi-command -p`). GNU readline has NO default `redo` binding at all
     // (`bind -l` lists no `redo` function — only `vi-redo`, unbound), so
-    // the previous `Redo` binding here was an invention that also broke
-    // `C-g` aborting an active search: the engine's search dispatches
-    // abort on the `Esc` event.
-    kb.add_binding(KM::CONTROL, KC::Char('g'), ReedlineEvent::Esc);
+    // the previous `Redo` binding here was an invention. `C-g` carries
+    // its own `Abort` event rather than `Esc`: inside an incremental
+    // search the two keys diverge in GNU — `C-g` restores the pre-search
+    // line while Esc terminates the search keeping the found line
+    // (isearch.c:526-553) — so they must not share an event.
+    kb.add_binding(KM::CONTROL, KC::Char('g'), ReedlineEvent::Abort);
     kb.add_binding(KM::CONTROL, KC::Char('z'), ReedlineEvent::Suspend);
     // GNU revert-line (undo.c:331): M-r and M-C-r undo every change to
     // the current line (emacs_keymap.c:445 and :336 respectively).
@@ -399,7 +401,7 @@ impl Emacs {
             (KeyModifiers::CONTROL, KeyCode::Char('r')) => ReedlineEvent::ReReadInitFile,
             (KeyModifiers::CONTROL, KeyCode::Char('u')) => edit_bind(EditCommand::Undo),
             // `C-x C-g` — GNU `abort` (the ctlx keymap's own C-g slot).
-            (KeyModifiers::CONTROL, KeyCode::Char('g')) => ReedlineEvent::Esc,
+            (KeyModifiers::CONTROL, KeyCode::Char('g')) => ReedlineEvent::Abort,
             // `C-x C-x` — GNU `exchange-point-and-mark`
             // (emacs_keymap.c:622).
             (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
@@ -683,7 +685,7 @@ mod test {
         assert_eq!(emacs.parse_event(cx()), ReedlineEvent::Pending);
         assert_eq!(
             emacs.parse_event(key('g', KeyModifiers::CONTROL)),
-            ReedlineEvent::Esc
+            ReedlineEvent::Abort
         );
         // An unbound chord key dings (None) and clears the prefix —
         // the same key self-inserts on the next press.
@@ -817,19 +819,22 @@ mod test {
     /// abort`). GNU readline defines no `redo` function at all, so the
     /// binding must not be `Edit(Redo)` — which also swallowed `C-g`
     /// during an incremental search instead of aborting it (T2 F3).
+    /// The binding is the dedicated `Abort` event, not `Esc`: inside
+    /// an incremental search the keys diverge (C-g restores the
+    /// pre-search line, Esc keeps the found line — ruline#52 D2).
     #[test]
     fn ctrl_g_is_abort_not_redo() {
         let kb = default_emacs_keybindings();
         assert_eq!(
             kb.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(ReedlineEvent::Esc)
+            Some(ReedlineEvent::Abort)
         );
         // The vi-command map carries the same abort slot; vi-insert
         // self-inserts C-g in GNU and stays unbound here.
         assert_eq!(
             crate::default_vi_normal_keybindings()
                 .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(ReedlineEvent::Esc)
+            Some(ReedlineEvent::Abort)
         );
         assert_eq!(
             crate::default_vi_insert_keybindings()

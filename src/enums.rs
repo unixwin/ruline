@@ -1232,6 +1232,11 @@ pub enum UndoBehavior {
     /// Move the cursor position
     MoveCursor,
     /// Navigated the history using up or down arrows
+    ///
+    /// Not an edit to record: the landing restarts the undo stack at
+    /// the fetched entry, whose own undo list is what GNU installs on
+    /// recall (misc.c `rl_replace_from_history`), so undo and
+    /// revert-line stop at the recalled text (issue #53).
     HistoryNavigation,
     /// Catch-all for actions that should always form a unique undo point and never be
     /// grouped with later edits
@@ -1325,6 +1330,17 @@ pub enum ReedlineEvent {
     /// Esc event
     #[strum_discriminants(strum(serialize = "Esc", serialize = "Escape"))]
     Esc,
+
+    /// Abort event — GNU `rl_abort` (misc.c), bound to `C-g` in the
+    /// emacs and vi-command keymaps.
+    ///
+    /// Deliberately distinct from [`ReedlineEvent::Esc`]: in an
+    /// incremental history search `C-g` aborts and restores the
+    /// pre-search line, while Esc is a default member of
+    /// `isearch-terminators` (isearch.c:526-553) and terminates the
+    /// search *keeping* the found line — the two keys only coincide
+    /// outside the search, where both cancel transient state.
+    Abort,
 
     /// Mouse click event with screen coordinates
     Mouse {

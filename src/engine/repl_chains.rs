@@ -489,15 +489,15 @@ fn chain_revert_line_clears_fresh_line() {
     expect(&rl, "undo retyped", "", 0);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D1): GNU revert-line undoes
-/// the changes made to *this* line, and a recalled history line
-/// starts a fresh undo boundary — recall `git status`, edit it, and
-/// M-r must give back `git status`. The engine instead reverts past
-/// the recall, emptying the line: the recall itself sits on the
-/// line's undo stack. Kept as the regression seed; do not bend the
-/// expectations to the current behaviour.
+/// GNU revert-line undoes the changes made to *this* line, and a
+/// recalled history line starts a fresh undo boundary: fetching an
+/// entry installs that entry's own undo list (misc.c
+/// `rl_replace_from_history` — `rl_undo_list = entry->data`, empty
+/// for an entry not edited this session), so undo and revert-line
+/// can never cross the recall into the line that was live before
+/// traversal. Recall `git status`, edit it, and M-r must give back
+/// `git status` (issue #53).
 #[test]
-#[ignore = "defect D1: revert-line crosses the history-recall boundary"]
 fn chain_revert_line_restores_recalled_history() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["git status"]);
@@ -514,6 +514,102 @@ fn chain_revert_line_restores_recalled_history() {
     // line is undone in one step.
     press(&mut rl, alt('r'));
     expect(&rl, "M-r reverts", "git status", 10);
+}
+
+#[test]
+fn chain_undo_and_revert_on_untouched_recall_are_noops() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    // The recalled line carries an empty undo list (misc.c
+    // `rl_replace_from_history`): C-_ right after the recall has
+    // nothing to undo and must not touch the line — the recall
+    // itself is not an undoable edit.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo on untouched recall is a no-op", "git status", 10);
+
+    // Same for revert-line on the untouched recall.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r on untouched recall is a no-op", "git status", 10);
+}
+
+#[test]
+fn chain_undo_stops_at_recall_boundary() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    type_str(&mut rl, " -s");
+    press(&mut rl, ctrl('a'));
+    type_str(&mut rl, "x");
+    expect(&rl, "edited recall", "xgit status -s", 1);
+
+    // Undo walks the edits made *since* the recall, newest first,
+    // and stops at the recalled text: the boundary is the floor.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo x", "git status -s", 0);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo suffix", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo at boundary is a no-op", "git status", 10);
+}
+
+#[test]
+fn chain_revert_line_stops_at_each_recall_hop() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status", "git diff"]);
+
+    // Each traversal hop lands on an entry with its own undo
+    // boundary: editing the older entry and reverting gives back
+    // that entry, not the newer one visited in between.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "git diff", 8);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older", "git status", 10);
+
+    type_str(&mut rl, " -s");
+    expect(&rl, "edited older entry", "git status -s", 13);
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r reverts to this hop's entry", "git status", 10);
+}
+
+#[test]
+fn chain_undo_stops_at_recall_boundary_after_typed_prefix() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    // Type on the live line first, so the pre-recall undo stack is
+    // non-empty when the recall lands (the chains above all recall
+    // from an empty line, where the boundary clear is unobservable).
+    // With a non-empty buffer and the cursor at its end, Up runs a
+    // prefix search on the typed text, so the typed text is a prefix
+    // of the seeded entry; the landing still routes through the same
+    // history-navigation throat.
+    type_str(&mut rl, "git");
+    expect(&rl, "typed live line", "git", 3);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    // Edit the recalled line, then undo repeatedly: undo stops at
+    // the recalled text and never crosses into the pre-recall "git".
+    type_str(&mut rl, "!");
+    expect(&rl, "edited recall", "git status!", 11);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo edit", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo at floor is a no-op", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo still at floor", "git status", 10);
+
+    // Revert-line likewise stops at the floor.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r at floor is a no-op", "git status", 10);
 }
 
 // ---------------------------------------------------------------------
@@ -575,15 +671,14 @@ fn chain_isearch_narrows_per_keystroke() {
     expect(&rl, "accepted line", "alpha one", 0);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D4): after an isearch is
-/// accepted, the history cursor is left desynced — GNU positions
-/// you *on* the found entry, so Up/Down step to its neighbours.
-/// Here Up from the accepted middle entry jumps to a NEWER entry,
-/// Down can leave the buffer showing an entry the cursor no longer
-/// reports, and accepting the newest entry wedges navigation
-/// entirely. Kept as the regression seed with the GNU expectation.
+/// Regression pin for ruline#52 D4: after an isearch is accepted,
+/// the history cursor must stay positioned *on* the found entry —
+/// GNU's `_rl_isearch_fini` moves the history position onto
+/// `last_found_line` (isearch.c:288-291) — so Up/Down step to its
+/// neighbours. (Seed history: PR #51 recorded the desync this pins
+/// against — Up from the accepted middle entry jumped to a NEWER
+/// entry, and accepting the newest entry wedged navigation.)
 #[test]
-#[ignore = "defect D4: history navigation is desynced after isearch accept"]
 fn chain_isearch_accept_positions_history_cursor() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["alpha one", "beta two", "alpha three"]);
@@ -626,17 +721,14 @@ fn chain_isearch_abort_restores_original_line() {
     expect(&rl, "abort restores draft", "draft", 5);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D5): GNU's dispatch
-/// finalizes the search first — found line in the buffer, point at
-/// the match start — and *then* executes the pending command on
-/// it. The engine's fallback (`run_history_commands`) flips to
-/// regular mode and runs the command against the pre-search buffer
-/// without finalizing; the found line is restored afterwards by
-/// the buffer sync, so the command's effect is silently discarded
-/// (C-e here leaves the point at 0 instead of the line end).
-/// Kept as the regression seed with the GNU expectation.
+/// Regression pin for ruline#52 D5: GNU's dispatch finalizes the
+/// search first — found line in the buffer, point at the match
+/// start — and *then* executes the pending command on it
+/// (isearch.c:513-524). (Seed history: PR #51 recorded the engine's
+/// fallback `run_history_commands` running the command against the
+/// pre-search buffer instead, silently discarding its effect —
+/// C-e left the point at 0 instead of the line end.)
 #[test]
-#[ignore = "defect D5: isearch exit-and-execute runs the command on the pre-search buffer, discarding it"]
 fn chain_isearch_command_key_exits_and_executes() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["beta two", "gamma three"]);
@@ -662,15 +754,24 @@ fn chain_isearch_command_key_exits_and_executes() {
     expect(&rl, "edit after exit", "gamma three --verbose", 21);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D2): in GNU, Esc is a
-/// default member of `isearch-terminators` (isearch.c:529-532,
+/// Regression pin for ruline#52 D2: in GNU, Esc is a default
+/// member of `isearch-terminators` (isearch.c:529-532,
 /// "\033\012") — it terminates the search *keeping the found line*;
-/// only C-g (rl_abort) restores the pre-search line. The engine
-/// dispatches abort on the Esc event, so Esc throws the found line
-/// away exactly like C-g. Kept as the regression seed with the GNU
-/// expectation; do not bend it to the current behaviour.
+/// only C-g (rl_abort) restores the pre-search line. (Seed history:
+/// PR #51 recorded Esc throwing the found line away exactly like
+/// C-g, because the keymap layer mapped both keys to the same
+/// event.)
+///
+/// Point expectation corrected against the GNU oracle by the #52
+/// lane: the seed originally expected point 11 (line end) after
+/// Esc, but `_rl_isearch_fini` sets `rl_point = cxt->sline_index`
+/// (isearch.c:302) — the match start — and a PTY probe against GNU
+/// bash 5.3.20 confirms it (C-r `gamma` Esc, then typing `X`,
+/// yields `Xgamma three`: the marker lands at offset 0). The chain
+/// therefore expects the match start after Esc and presses C-e
+/// before typing on, preserving the seed's "the line stays
+/// editable" intent at the GNU-true point.
 #[test]
-#[ignore = "defect D2: Esc aborts isearch instead of terminating it, discarding the found line"]
 fn chain_isearch_escape_keeps_found_line() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["beta two", "gamma three"]);
@@ -683,12 +784,15 @@ fn chain_isearch_escape_keeps_found_line() {
         "searching gamma"
     );
 
-    // Esc terminates the search and keeps the found line for editing.
+    // Esc terminates the search and keeps the found line for
+    // editing, point at the match start (GNU fini, isearch.c:302).
     press(&mut rl, key(KeyCode::Esc));
     assert_eq!(rl.input_mode, InputMode::Regular, "Esc leaves search");
-    expect(&rl, "found line kept", "gamma three", 11);
+    expect(&rl, "found line kept", "gamma three", 0);
 
     // And it is an ordinary line now: editing continues on it.
+    press(&mut rl, ctrl('e'));
+    expect(&rl, "C-e to line end", "gamma three", 11);
     type_str(&mut rl, " --verbose");
     expect(&rl, "edit after Esc", "gamma three --verbose", 21);
 }
@@ -728,15 +832,16 @@ fn chain_isearch_failed_needle_recovers_on_backspace() {
     assert_eq!(rl.input_mode, InputMode::Regular);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D3): when an isearch needle
-/// stops matching, GNU keeps the last successful match on the line
-/// and only flags the prompt as failed. The engine drops the match:
-/// the history cursor loses its entry, and the painter renders an
-/// empty line (`string_at_cursor().unwrap_or_default()` in
-/// `history_search_paint`). Kept as the regression seed with the
-/// GNU expectation.
+/// Regression pin for ruline#52 D3: when an isearch needle stops
+/// matching, GNU keeps the last successful match on the line and
+/// only flags the prompt as failed (isearch.c:863-870: on failure
+/// `history_pos` returns to `last_found_line`, whose line is what
+/// `rl_display_search` shows — PTY-verified against GNU bash
+/// 5.3.20: `(failed reverse-i-search)`betax': beta two`).
+/// (Seed history: PR #51 recorded the engine dropping the match —
+/// the history cursor lost its entry and the painter rendered an
+/// empty line.)
 #[test]
-#[ignore = "defect D3: a failed isearch needle drops the last match instead of displaying it"]
 fn chain_isearch_failed_needle_keeps_last_match() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["alpha one", "beta two"]);
