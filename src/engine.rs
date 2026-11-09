@@ -3082,7 +3082,7 @@ impl Reedline {
             _ => {}
         }
         let status = if self.input_mode == InputMode::HistorySearch {
-            self.handle_history_search_event(event)
+            self.handle_history_search_event(prompt, event)
         } else if self.input_mode == InputMode::NonIncrementalSearch {
             self.handle_noninc_search_event(event)
         } else {
@@ -3102,11 +3102,15 @@ impl Reedline {
         status
     }
 
-    fn handle_history_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
+    fn handle_history_search_event(
+        &mut self,
+        prompt: &dyn Prompt,
+        event: ReedlineEvent,
+    ) -> io::Result<EventStatus> {
         match event {
             ReedlineEvent::UntilFound(events) => {
                 for event in events {
-                    match self.handle_history_search_event(event)? {
+                    match self.handle_history_search_event(prompt, event)? {
                         EventStatus::Inapplicable => {
                             // Try again with the next event handler
                         }
@@ -3125,7 +3129,7 @@ impl Reedline {
                 // and chord-timeout flushes arrive as `Multiple`).
                 let mut latest_signal = EventStatus::Inapplicable;
                 for event in events {
-                    match self.handle_history_search_event(event)? {
+                    match self.handle_history_search_event(prompt, event)? {
                         EventStatus::Inapplicable => {}
                         EventStatus::Exits(signal) => {
                             return Ok(EventStatus::Exits(signal));
@@ -3245,12 +3249,32 @@ impl Reedline {
                 self.input_mode = InputMode::Regular;
                 Ok(EventStatus::Handled)
             }
-            // TODO: Check if events should be handled
+            // GNU's isearch dispatch (isearch.c:513-524): a standalone
+            // movement event is a base-keymap command that is not
+            // `rl_insert`, so it terminates the search and is then
+            // executed as the pending command — the same
+            // fini-then-execute path the `run_history_commands`
+            // fallback arm gives `Edit` commands (ruline#52 D5), here
+            // for the alias events. `C-f` and the Right arrow both
+            // arrive as `UntilFound([HistoryHintComplete, MenuRight,
+            // Right])` and resolve at this arm. The fini is
+            // unconditional, so the event reports Handled even when
+            // the movement itself has nowhere to go: the search is
+            // over either way, and an enclosing `UntilFound` must not
+            // try further candidates against a state that no longer
+            // exists. Movement semantics delegate to the regular-mode
+            // arms rather than being re-implemented here.
             ReedlineEvent::Right
             | ReedlineEvent::Left
             | ReedlineEvent::ToStart
-            | ReedlineEvent::ToEnd
-            | ReedlineEvent::KeySequence(_)
+            | ReedlineEvent::ToEnd => {
+                self.finalize_history_search();
+                self.input_mode = InputMode::Regular;
+                let _ = self.handle_editor_event(prompt, event)?;
+                Ok(EventStatus::Handled)
+            }
+            // TODO: Check if events should be handled
+            ReedlineEvent::KeySequence(_)
             | ReedlineEvent::QuotedInsert
             | ReedlineEvent::CharSearch { .. }
             | ReedlineEvent::YankLastArg { .. }
@@ -3422,6 +3446,41 @@ impl Reedline {
             ReedlineEvent::ClearScrollback => {
                 self.painter.clear_scrollback()?;
                 Ok(EventStatus::Handled)
+            }
+            ReedlineEvent::Left | ReedlineEvent::Right => {
+                // GNU's `_rl_nsearch_dispatch` (search.c:308) has no
+                // fini-then-execute path: it dispatches on raw
+                // characters and inserts anything unlisted into the
+                // search string — the buffer being edited *is* the
+                // string, and the search has not run yet. In this
+                // event model the standalone movements are the aliases
+                // of the movements the `Edit` arm above already applies
+                // to that string, so they move the point within it and
+                // the search stays open, with the regular-mode arms'
+                // implementation and status semantics (ruline#60).
+                let command = if event == ReedlineEvent::Left {
+                    EditCommand::MoveLeft { select: false }
+                } else {
+                    EditCommand::MoveRight { select: false }
+                };
+                Ok(self.run_edit_commands_with_status(&[command]).into())
+            }
+            ReedlineEvent::ToStart | ReedlineEvent::ToEnd => {
+                // Same class as above, mirroring the regular-mode
+                // `ToStart`/`ToEnd` arm: direct editor moves (no undo
+                // point, no mode change), Handled iff the point moved.
+                let initial_cursor = self.editor.line_buffer().cursor();
+                if event == ReedlineEvent::ToStart {
+                    self.editor.move_to_start(false);
+                } else {
+                    self.editor.move_to_end(false);
+                }
+                self.editor.commit_cursor();
+                Ok(if self.editor.line_buffer().cursor() == initial_cursor {
+                    EventStatus::Inapplicable
+                } else {
+                    EventStatus::Handled
+                })
             }
             // Anything else GNU would read as a literal input byte has
             // no reedline form; the event is ignored, as a key with no
@@ -6761,8 +6820,11 @@ mod tests {
         let mut rl = auto_pair_engine(&[('(', ')')]);
         rl.enter_history_search();
 
-        rl.handle_history_search_event(ReedlineEvent::Edit(vec![EditCommand::InsertChar('(')]))
-            .expect("history search event handled");
+        rl.handle_history_search_event(
+            &DefaultPrompt::default(),
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar('(')]),
+        )
+        .expect("history search event handled");
 
         assert_eq!(rl.input_mode, InputMode::HistorySearch);
         assert_eq!(rl.editor.get_buffer(), "");
@@ -13405,7 +13467,7 @@ mod tests {
         assert_eq!(rl.input_mode, InputMode::HistorySearch);
 
         let status = rl
-            .handle_history_search_event(ReedlineEvent::ReReadInitFile)
+            .handle_history_search_event(&DefaultPrompt::default(), ReedlineEvent::ReReadInitFile)
             .unwrap();
         assert!(matches!(status, EventStatus::Handled));
         assert_eq!(rl.input_mode, InputMode::Regular);
