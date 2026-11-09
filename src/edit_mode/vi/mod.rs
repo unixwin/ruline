@@ -13,11 +13,12 @@ use super::{
     parse_non_key_event, EditMode, SequenceResolution, SequenceResolver,
 };
 use crate::{
+    core_editor::locate_word,
     edit_mode::{
         keybindings::{KeyCombination, Keybindings},
         vi::parser::parse,
     },
-    enums::{EditCommand, EventStatus, ReedlineEvent, ReedlineRawEvent},
+    enums::{EditCommand, EventStatus, ReedlineEvent, ReedlineRawEvent, WordEdge, WordKind},
     Direction, MotionTarget, PromptEditMode, PromptViMode,
 };
 
@@ -64,6 +65,26 @@ pub struct Vi {
     // An `R` (replace) session turned overstrike on and owns turning
     // it back off when the session ends.
     replace_session: bool,
+    // A whole-line operator (`cj`/`dj`/`yj`) has been dispatched and
+    // recorded, but only the editor can judge its motion — a line
+    // target at the buffer edge is dead, and GNU cancels the operator
+    // before its dispatch in that case. Until the editor's verdict
+    // arrives through `note_edit_outcome`, the revocation is staged
+    // here.
+    pending_operator: Option<PendingOperator>,
+}
+
+/// A dispatched whole-line operator awaiting the editor's verdict.
+struct PendingOperator {
+    /// The operator command as emitted; the editor's report is
+    /// matched against it.
+    command: EditCommand,
+    /// The `.` record as it stood before this operator overwrote it.
+    previous: Option<ReedlineEvent>,
+    /// The mode the machine was in before the operator was parsed.
+    mode_before: ViMode,
+    /// Whether the operator opened an insert session (a change).
+    entered_insert: bool,
 }
 
 impl Default for Vi {
@@ -101,6 +122,7 @@ impl Vi {
             resolver: SequenceResolver::new(),
             insert_capture: None,
             replace_session: false,
+            pending_operator: None,
         }
     }
 
@@ -120,8 +142,17 @@ impl EditMode for Vi {
             Event::Key(KeyEvent {
                 code, modifiers, ..
             }) => {
-                let event = self.dispatch_key(modifiers, code);
+                let mut event = self.dispatch_key(modifiers, code);
                 self.observe_insert_capture(&event);
+                if self.finish_insert_capture_on_submit(&event) {
+                    // An `R` session ended by submitting: append the
+                    // overstrike-off the session owns, the same event
+                    // `escape()` emits on its own exit path.
+                    event = ReedlineEvent::Multiple(vec![
+                        event,
+                        ReedlineEvent::OverwriteMode(Some(false)),
+                    ]);
+                }
                 event
             }
             event => parse_non_key_event(event),
@@ -145,10 +176,36 @@ impl EditMode for Vi {
                 // be parsed as its argument in the new mode.
                 self.cache.clear();
                 self.resolver.reset();
+                self.pending_operator = None;
                 self.mode = ViMode::from(target);
                 EventStatus::Handled
             }
             _ => EventStatus::Inapplicable,
+        }
+    }
+
+    fn note_edit_outcome(&mut self, commands: &[EditCommand], status: EventStatus) {
+        let Some(pending) = &self.pending_operator else {
+            return;
+        };
+        if !commands.contains(&pending.command) {
+            return;
+        }
+        let pending = self.pending_operator.take().expect("checked above");
+        if matches!(status, EventStatus::Inapplicable) {
+            // The editor's verdict: the line target was dead, so in
+            // GNU the operator's dispatch never ran — `rl_vi_domove`
+            // returned -1 and the operator rang the bell instead
+            // (vi_mode.c:1385). Un-stage everything the parse set up:
+            // the `.` record goes back to the action it overwrote, the
+            // mode returns to what it was before the operator, and an
+            // insert capture the operator started is dropped rather
+            // than folded.
+            self.previous = pending.previous;
+            self.mode = pending.mode_before;
+            if pending.entered_insert {
+                self.insert_capture = None;
+            }
         }
     }
 
@@ -168,6 +225,43 @@ impl EditMode for Vi {
         let event = combine_events(self.flush_keys(&pending));
         self.observe_insert_capture(&event);
         event
+    }
+}
+
+/// The whole-line operator command inside an emitted event tree, if
+/// any: the one command shape whose motion can die at the buffer
+/// edge, which only the editor can judge.
+fn line_operator_command(event: &ReedlineEvent) -> Option<EditCommand> {
+    match event {
+        ReedlineEvent::Multiple(events) | ReedlineEvent::UntilFound(events) => {
+            events.iter().find_map(line_operator_command)
+        }
+        ReedlineEvent::Edit(commands) => commands.iter().find_map(|command| {
+            let target = match command {
+                EditCommand::Cut { target, .. }
+                | EditCommand::Copy { target, .. }
+                | EditCommand::Change { target, .. } => Some(target),
+                EditCommand::Erase(target) => Some(target),
+                _ => None,
+            };
+            match target {
+                Some(MotionTarget::Line(_)) => Some(command.clone()),
+                _ => None,
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// Whether an event tree submits the line (`Enter`, possibly nested
+/// inside the mode's own wrappers).
+fn event_submits(event: &ReedlineEvent) -> bool {
+    match event {
+        ReedlineEvent::Enter | ReedlineEvent::Submit => true,
+        ReedlineEvent::Multiple(events) | ReedlineEvent::UntilFound(events) => {
+            events.iter().any(event_submits)
+        }
+        _ => false,
     }
 }
 
@@ -400,6 +494,7 @@ impl Vi {
                         self.cache.clear();
                         ReedlineEvent::None
                     } else if res.is_complete(self.mode) {
+                        let previous_snapshot = self.previous.clone();
                         let mut event = res.to_reedline_event(self);
                         let previous_mode = self.mode;
                         let mode_changed = match res.changes_mode(previous_mode) {
@@ -427,6 +522,21 @@ impl Vi {
                                     event,
                                 ]);
                             }
+                        }
+                        // A whole-line operator's motion can only be
+                        // judged by the editor, which owns the buffer:
+                        // if the line target is dead (`cj` on the last
+                        // line), GNU cancels the operator before its
+                        // dispatch (`rl_vi_domove`, vi_mode.c:1385).
+                        // Stage the revocation until the editor's
+                        // verdict arrives via `note_edit_outcome`.
+                        if let Some(command) = line_operator_command(&event) {
+                            self.pending_operator = Some(PendingOperator {
+                                command,
+                                previous: previous_snapshot,
+                                mode_before: previous_mode,
+                                entered_insert: mode_changed && self.mode == ViMode::Insert,
+                            });
                         }
                         // A mode change must repaint even when the edit is a
                         // no-op (e.g. `a` at line end), mirroring helix's
@@ -500,6 +610,7 @@ impl Vi {
     fn escape(&mut self) -> Vec<ReedlineEvent> {
         self.cache.clear();
         self.resolver.reset();
+        self.pending_operator = None;
         let leaving_insert = self.mode == ViMode::Insert;
         self.mode = ViMode::Normal;
         let mut events = vec![ReedlineEvent::Esc];
@@ -519,11 +630,13 @@ impl Vi {
     }
 
     /// Watch a dispatched event for text typed into a captured insert
-    /// session: self-inserts accumulate, and a rubout removes the last
-    /// captured char (GNU folds the session's rubouts the same way for
-    /// the common shapes). Everything else — cursor moves, history
-    /// recalls, `Ctrl-W` — is outside the capture; see the report note
-    /// on the replay boundary.
+    /// session: self-inserts accumulate, and the rubouts fold back
+    /// out — `Backspace` pops the last captured char, `Ctrl-W` cuts
+    /// the span the editor's own word resolver cuts, and `Ctrl-U`
+    /// discards the whole capture, so the record holds the session's
+    /// *net* text the way GNU's undo-span derivation does. Everything
+    /// else — cursor moves, history recalls — is outside the capture;
+    /// see the report note on the replay boundary.
     fn observe_insert_capture(&mut self, event: &ReedlineEvent) {
         if self.insert_capture.is_none() || self.mode != ViMode::Insert {
             return;
@@ -543,12 +656,53 @@ impl Vi {
                         EditCommand::Backspace => {
                             capture.pop();
                         }
+                        EditCommand::BackspaceWord => {
+                            // `Ctrl-W` rubbed a word out of the
+                            // buffer; fold the same span out of the
+                            // capture, resolved from its end — the
+                            // session's text is what the cursor sits
+                            // at the end of — by the editor's own
+                            // resolver (`word_left_index`).
+                            let start = locate_word(
+                                capture,
+                                capture.len(),
+                                WordKind::Alphabetic,
+                                WordEdge::Start,
+                                Direction::Backward,
+                            );
+                            capture.truncate(start);
+                        }
+                        EditCommand::CutFromStart => {
+                            // `Ctrl-U` discards everything typed on
+                            // the line: the session's net text is
+                            // empty, however much was typed.
+                            capture.clear();
+                        }
                         _ => {}
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    /// An insert session can end by submitting the line, not only by
+    /// `Esc`: GNU saves the insert on the `Enter` path too
+    /// (`rl_newline` calls `_rl_vi_done_inserting`, text.c:1158).
+    /// Fold the capture when the dispatched event submits, and report
+    /// whether an `R` session ended that way, so the caller can
+    /// append the overstrike-off the session owns — exactly what
+    /// `escape()` emits on its own exit path. Without the fold the
+    /// capture outlives its line: it folds late at some later `Esc`,
+    /// with the next line's typing folded in.
+    fn finish_insert_capture_on_submit(&mut self, event: &ReedlineEvent) -> bool {
+        if self.insert_capture.is_none() || !event_submits(event) {
+            return false;
+        }
+        let was_replace = self.replace_session;
+        self.finish_insert_capture();
+        self.replace_session = false;
+        was_replace
     }
 
     /// Fold the text typed during the insert session that just ended
@@ -563,14 +717,35 @@ impl Vi {
         if text.is_empty() {
             return;
         }
-        let insert = ReedlineEvent::Edit(vec![EditCommand::InsertString(text)]);
+        let inserts: Vec<ReedlineEvent> = if self.replace_session {
+            // An `R` session's replay must replace, not insert: fold
+            // the text as the keystrokes themselves, so the replay
+            // re-runs the editor's overstrike path — which only
+            // `InsertChar` honors — and close with the session's own
+            // overstrike-off. GNU replays an `R` insert as an atomic
+            // replace and leaves no overstrike behind
+            // (`_rl_vi_replace_insert`, vi_mode.c:222).
+            let mut events: Vec<ReedlineEvent> = text
+                .chars()
+                .map(|c| ReedlineEvent::Edit(vec![EditCommand::InsertChar(c)]))
+                .collect();
+            events.push(ReedlineEvent::OverwriteMode(Some(false)));
+            events
+        } else {
+            vec![ReedlineEvent::Edit(vec![EditCommand::InsertString(text)])]
+        };
         self.previous = Some(match self.previous.take() {
             Some(ReedlineEvent::Multiple(mut events)) => {
-                events.push(insert);
+                events.extend(inserts);
                 ReedlineEvent::Multiple(events)
             }
-            Some(single) => ReedlineEvent::Multiple(vec![single, insert]),
-            None => insert,
+            Some(single) => {
+                let mut events = vec![single];
+                events.extend(inserts);
+                ReedlineEvent::Multiple(events)
+            }
+            None if inserts.len() == 1 => inserts.into_iter().next().expect("one insert"),
+            None => ReedlineEvent::Multiple(inserts),
         });
     }
 
