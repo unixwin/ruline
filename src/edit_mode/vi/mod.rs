@@ -719,18 +719,22 @@ impl Vi {
         }
         let inserts: Vec<ReedlineEvent> = if self.replace_session {
             // An `R` session's replay must replace, not insert: fold
-            // the text as the keystrokes themselves, so the replay
-            // re-runs the editor's overstrike path — which only
-            // `InsertChar` honors — and close with the session's own
-            // overstrike-off. GNU replays an `R` insert as an atomic
-            // replace and leaves no overstrike behind
-            // (`_rl_vi_replace_insert`, vi_mode.c:222).
-            let mut events: Vec<ReedlineEvent> = text
-                .chars()
-                .map(|c| ReedlineEvent::Edit(vec![EditCommand::InsertChar(c)]))
-                .collect();
-            events.push(ReedlineEvent::OverwriteMode(Some(false)));
-            events
+            // it as the editor's replace primitive — one grapheme of
+            // span per typed char, clamped at the buffer end — and
+            // close with the session's own overstrike-off. GNU
+            // replays an `R` insert as an atomic `_rl_replace_text`
+            // and leaves no overstrike behind
+            // (`_rl_vi_replace_insert`, vi_mode.c:222). Re-typing the
+            // text as `InsertChar`s would not do: under the command
+            // mode's block caret that command inserts at the head,
+            // one grapheme past the caret the replace belongs on.
+            vec![
+                ReedlineEvent::Edit(vec![EditCommand::ReplaceChars(
+                    text.chars().count(),
+                    text,
+                )]),
+                ReedlineEvent::OverwriteMode(Some(false)),
+            ]
         } else {
             vec![ReedlineEvent::Edit(vec![EditCommand::InsertString(text)])]
         };
