@@ -139,6 +139,10 @@ impl Editor {
     pub(crate) fn run_edit_command(&mut self, command: &EditCommand) -> EditCommandStatus {
         let initial_cursor = self.line_buffer.cursor();
         let mut status = EditCommandStatus::Applied;
+        // Set when an operator's motion turns out dead (a whole-line
+        // target at the buffer edge): the command is cancelled below,
+        // before any of the tail bookkeeping runs.
+        let mut operator_cancelled = false;
 
         match command {
             EditCommand::MoveToStart { select } => self.move_to_start(*select),
@@ -268,6 +272,8 @@ impl Editor {
                         self.caret_geometry(),
                     );
                     self.operate(sel, OperatorVerb::Cut, *granularity);
+                } else {
+                    operator_cancelled = true;
                 }
             }
             EditCommand::Copy {
@@ -282,6 +288,8 @@ impl Editor {
                         self.caret_geometry(),
                     );
                     self.operate(sel, OperatorVerb::Copy, *granularity);
+                } else {
+                    operator_cancelled = true;
                 }
             }
             EditCommand::Change {
@@ -296,6 +304,8 @@ impl Editor {
                         self.caret_geometry(),
                     );
                     self.operate(sel, OperatorVerb::Change, *granularity);
+                } else {
+                    operator_cancelled = true;
                 }
             }
             EditCommand::Erase(t) => {
@@ -307,6 +317,8 @@ impl Editor {
                         self.caret_geometry(),
                     );
                     self.operate(sel, OperatorVerb::Erase, Granularity::CharWise);
+                } else {
+                    operator_cancelled = true;
                 }
             }
             EditCommand::InsertChar(c) => self.insert_char(*c),
@@ -464,6 +476,16 @@ impl Editor {
             EditCommand::AddTextObject { text_object } => self.add_text_object(*text_object),
             EditCommand::RemoveTextObject { text_object } => self.remove_text_object(*text_object),
             EditCommand::ReplaceTextObject { old, new } => self.replace_text_object(*old, *new),
+        }
+        if operator_cancelled {
+            // GNU: `rl_vi_domove` (vi_mode.c:1385) failing cancels the
+            // operator wholesale — `rl_vi_change_to`/`rl_vi_delete_to`
+            // ring the bell and the dispatch (`rl_vi_start_inserting`
+            // and friends) never runs. So nothing about the command may
+            // land: no selection clear, no cursor commit, no kill-ring
+            // or undo bookkeeping — and the batch reports the silent
+            // ding (`Inapplicable`) the mode machine listens for.
+            return EditCommandStatus::Inapplicable;
         }
         let leaves_selection = matches!(command.edit_type(), EditType::MoveCursor { select: true })
             || matches!(command, EditCommand::PasteAtSelectionEdge { .. })
