@@ -81,6 +81,14 @@ impl Driver {
                     self.apply(e);
                 }
             }
+            // See issue50_probe: the cursor keys arrive as
+            // `UntilFound` combos; with no menu/hint state in the
+            // probe, applying the sequence mirrors the engine.
+            ReedlineEvent::UntilFound(evs) => {
+                for e in evs {
+                    self.apply(e);
+                }
+            }
             ReedlineEvent::OverwriteMode(on) => {
                 let next = on.unwrap_or(!self.editor.overwrite());
                 self.editor.set_overwrite(next);

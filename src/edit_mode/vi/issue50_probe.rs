@@ -65,6 +65,18 @@ impl Driver {
                     self.apply(e);
                 }
             }
+            // The keybinding tables emit `UntilFound` combos for the
+            // cursor keys (`l` arrives as
+            // `UntilFound([HistoryHintComplete, MenuRight, Edit(..)])`):
+            // the engine tries each in order until one applies. The
+            // menu/hint entries have no state to act on in the probe,
+            // so applying the sequence lands the edit exactly like
+            // the engine does with no menu open.
+            ReedlineEvent::UntilFound(evs) => {
+                for e in evs {
+                    self.apply(e);
+                }
+            }
             // The engine routes this to `Editor::set_overwrite`
             // (engine.rs, `ReedlineEvent::OverwriteMode`); mirror it so
             // `R` sessions overstrike in the probe like in the product.
