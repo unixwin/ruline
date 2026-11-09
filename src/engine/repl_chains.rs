@@ -578,6 +578,40 @@ fn chain_revert_line_stops_at_each_recall_hop() {
     expect(&rl, "M-r reverts to this hop's entry", "git status", 10);
 }
 
+#[test]
+fn chain_undo_stops_at_recall_boundary_after_typed_prefix() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    // Type on the live line first, so the pre-recall undo stack is
+    // non-empty when the recall lands (the chains above all recall
+    // from an empty line, where the boundary clear is unobservable).
+    // With a non-empty buffer and the cursor at its end, Up runs a
+    // prefix search on the typed text, so the typed text is a prefix
+    // of the seeded entry; the landing still routes through the same
+    // history-navigation throat.
+    type_str(&mut rl, "git");
+    expect(&rl, "typed live line", "git", 3);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    // Edit the recalled line, then undo repeatedly: undo stops at
+    // the recalled text and never crosses into the pre-recall "git".
+    type_str(&mut rl, "!");
+    expect(&rl, "edited recall", "git status!", 11);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo edit", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo at floor is a no-op", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo still at floor", "git status", 10);
+
+    // Revert-line likewise stops at the floor.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r at floor is a no-op", "git status", 10);
+}
+
 // ---------------------------------------------------------------------
 // D. Reverse incremental search (C-r) chains
 // ---------------------------------------------------------------------
