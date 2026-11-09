@@ -729,10 +729,7 @@ impl Vi {
             // mode's block caret that command inserts at the head,
             // one grapheme past the caret the replace belongs on.
             vec![
-                ReedlineEvent::Edit(vec![EditCommand::ReplaceChars(
-                    text.chars().count(),
-                    text,
-                )]),
+                ReedlineEvent::Edit(vec![EditCommand::ReplaceChars(text.chars().count(), text)]),
                 ReedlineEvent::OverwriteMode(Some(false)),
             ]
         } else {
