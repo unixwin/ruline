@@ -1143,3 +1143,195 @@ fn chain_transpose_chars() {
 
 // TEMPORARY PROBE (not part of the suite): does a bare undo after a
 // history recall cross the recall boundary too?
+
+// ---------------------------------------------------------------------
+// I. Per-entry undo lists across history traversal (issue #57)
+// ---------------------------------------------------------------------
+//
+// GNU readline saves each line's undo list with the line when
+// traversal leaves it, and reinstalls that list when traversal lands
+// back on it: leaving an edited history entry stores the edited text
+// plus `rl_undo_list` into the entry (misc.c
+// `_rl_maybe_replace_line`), landing installs the entry's saved list
+// (misc.c `rl_replace_from_history` — `rl_undo_list = entry->data`),
+// and the live line the traversal started from is kept as the saved
+// line (misc.c `_rl_alloc_saved_line`) and restored — text and undo
+// list — when traversal walks back past the newest entry (misc.c
+// `rl_maybe_unsave_line`). Issue #53 (PR #54) made a landing restart
+// the undo stack at the landed text; that covers entries never
+// edited this session, whose saved list is empty. The chains below
+// pin the saved-list layer on top of it: an edited entry revisited
+// must offer the edits made before leaving it to C-_ / M-r, and so
+// must the draft line.
+
+#[test]
+fn chain_undo_on_revisited_entry_restores_saved_list() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older entry", "first entry", 11);
+
+    // Edit the older entry, then hop away: GNU stores the edited
+    // text and its undo list into the entry on leaving.
+    type_str(&mut rl, " -x");
+    expect(&rl, "edited older entry", "first entry -x", 14);
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "hop to newest", "second entry", 12);
+
+    // Landing back on the entry restores the edited text...
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "back on edited entry", "first entry -x", 14);
+
+    // ...and its saved undo list: C-_ undoes the edit made before
+    // leaving, then the list is exhausted.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo restores pre-edit text", "first entry", 11);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "saved list exhausted is a no-op", "first entry", 11);
+    press(&mut rl, alt('r'));
+    expect(&rl, "revert after undo is a no-op", "first entry", 11);
+}
+
+#[test]
+fn chain_revert_line_on_revisited_entry_restores_saved_list() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older entry", "first entry", 11);
+
+    type_str(&mut rl, " -x");
+    expect(&rl, "edited older entry", "first entry -x", 14);
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "hop to newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "back on edited entry", "first entry -x", 14);
+
+    // Revert-line walks the entry's whole saved undo list in one
+    // step, back to the entry's original text.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r reverts the saved edits", "first entry", 11);
+}
+
+#[test]
+fn chain_edited_entries_keep_separate_undo_lists() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    // Edit the newest entry, hop to the older one and edit that too:
+    // each entry keeps its own saved text and undo list.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    type_str(&mut rl, " -b");
+    expect(&rl, "edited newest entry", "second entry -b", 15);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "hop to older entry", "first entry", 11);
+    type_str(&mut rl, " -a");
+    expect(&rl, "edited older entry", "first entry -a", 14);
+
+    // Back on the newest entry: its edited text is intact, and C-_
+    // undoes only its own edit.
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "back on edited newest", "second entry -b", 15);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo newest entry's edit", "second entry", 12);
+
+    // The older entry's saved edit survived the round trip and is
+    // still undoable on its own list.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "older entry still edited", "first entry -a", 14);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo older entry's edit", "first entry", 11);
+}
+
+#[test]
+fn chain_undo_on_draft_line_survives_history_roundtrip() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    // A hand-typed draft with two discrete edits (two pastes, the
+    // unit model of chain_undo_walks_back_step_by_step).
+    paste(&mut rl, "one ");
+    expect(&rl, "draft first paste", "one ", 4);
+    paste(&mut rl, "two");
+    expect(&rl, "draft second paste", "one two", 7);
+
+    // Traversal starts: GNU saves the draft line and its undo list
+    // as the saved line. Walking back down restores both.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "back on draft", "one two", 7);
+
+    // C-_ now undoes the draft's own edits, newest first — the
+    // history visit in between is invisible to the draft's list.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo draft's second paste", "one ", 4);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo draft's first paste", "", 0);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "draft list exhausted is a no-op", "", 0);
+}
+
+#[test]
+fn chain_end_of_history_restores_draft_and_its_undo_list() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    paste(&mut rl, "one ");
+    paste(&mut rl, "two");
+    expect(&rl, "draft typed", "one two", 7);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older entry", "first entry", 11);
+
+    // M-> (GNU end-of-history, misc.c `rl_end_of_history`) jumps
+    // straight back to the saved live line, undo list included.
+    press(&mut rl, alt('>'));
+    expect(&rl, "M-> restores draft", "one two", 7);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo draft's second paste", "one ", 4);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo draft's first paste", "", 0);
+}
+
+#[test]
+fn chain_untouched_entries_stay_undo_noops_after_hops() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    // Hopping between entries never edited this session installs an
+    // empty saved list at every landing (the #53 boundary, kept
+    // under traversal): undo and revert are no-ops everywhere.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older entry", "first entry", 11);
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "hop back to newest", "second entry", 12);
+    press(&mut rl, ctrl('_'));
+    expect(
+        &rl,
+        "undo on untouched newest is a no-op",
+        "second entry",
+        12,
+    );
+    press(&mut rl, alt('r'));
+    expect(
+        &rl,
+        "revert on untouched newest is a no-op",
+        "second entry",
+        12,
+    );
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "hop back to older entry", "first entry", 11);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo on untouched older is a no-op", "first entry", 11);
+}
