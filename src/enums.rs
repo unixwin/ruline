@@ -1331,6 +1331,17 @@ pub enum ReedlineEvent {
     #[strum_discriminants(strum(serialize = "Esc", serialize = "Escape"))]
     Esc,
 
+    /// Abort event — GNU `rl_abort` (misc.c), bound to `C-g` in the
+    /// emacs and vi-command keymaps.
+    ///
+    /// Deliberately distinct from [`ReedlineEvent::Esc`]: in an
+    /// incremental history search `C-g` aborts and restores the
+    /// pre-search line, while Esc is a default member of
+    /// `isearch-terminators` (isearch.c:526-553) and terminates the
+    /// search *keeping* the found line — the two keys only coincide
+    /// outside the search, where both cancel transient state.
+    Abort,
+
     /// Mouse click event with screen coordinates
     Mouse {
         /// Column (x) position, 0-indexed from left
