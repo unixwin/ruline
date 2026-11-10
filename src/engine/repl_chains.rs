@@ -165,6 +165,14 @@ fn expect_ring(rl: &Reedline, step: &str, want_slot: &str, want_len: usize) {
     );
 }
 
+/// Send one standalone [`ReedlineEvent`] through the engine's event
+/// entry point, for events no default keybinding produces (a host may
+/// still send them — e.g. the standalone `ToStart`/`ToEnd` aliases).
+fn send_event(rl: &mut Reedline, event: ReedlineEvent) -> EventStatus {
+    let prompt = DefaultPrompt::default();
+    rl.handle_event(&prompt, event).expect("event ok")
+}
+
 // ---------------------------------------------------------------------
 // A. Basic editing chains
 // ---------------------------------------------------------------------
@@ -863,6 +871,246 @@ fn chain_isearch_failed_needle_keeps_last_match() {
         Some("beta two".into()),
         "needle betaxy failed keeps last match"
     );
+}
+
+/// Regression pin for ruline#60: a standalone movement event in
+/// isearch is a base-keymap command that is not `rl_insert`, so GNU's
+/// dispatch stashes it as the pending command, finalizes the search
+/// (found line in the buffer, point at the match start), and then
+/// executes it (isearch.c:513-524). The Right arrow arrives as
+/// `UntilFound([HistoryHintComplete, MenuRight, Right])`; the first
+/// two are inapplicable in search mode, so the chain must resolve at
+/// `Right` — on the base tree every candidate is Inapplicable and the
+/// search swallows the key.
+#[test]
+fn chain_issue60_isearch_right_arrow_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("gamma three".into()),
+        "searching gamma"
+    );
+    assert_eq!(rl.input_mode, InputMode::HistorySearch);
+
+    // Fini puts the point at the match start (0); Right then moves
+    // one grapheme into the found line.
+    press(&mut rl, key(KeyCode::Right));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Right leaves search");
+    expect(&rl, "found line kept, Right executed", "gamma three", 1);
+
+    // And it is an ordinary line now: editing continues on it.
+    type_str(&mut rl, "X");
+    expect(&rl, "edit after exit", "gXamma three", 2);
+}
+
+/// Regression pin for ruline#60: `C-f` spells the same
+/// `UntilFound([HistoryHintComplete, MenuRight, Right])` composite as
+/// the Right arrow, so in isearch it too must finalize the search and
+/// then move — on the base tree its net effect is "accept the search
+/// without moving" at best, and here it does not even leave the mode.
+#[test]
+fn chain_issue60_isearch_ctrl_f_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("gamma three".into()),
+        "searching gamma"
+    );
+
+    press(&mut rl, ctrl('f'));
+    assert_eq!(rl.input_mode, InputMode::Regular, "C-f leaves search");
+    expect(&rl, "found line kept, C-f executed", "gamma three", 1);
+
+    type_str(&mut rl, "X");
+    expect(&rl, "edit after exit", "gXamma three", 2);
+}
+
+/// Regression pin for ruline#60: `Left` after a mid-line match —
+/// fini leaves the point at the match start, and the pending `Left`
+/// moves one grapheme further into the found line (isearch.c:513-524).
+#[test]
+fn chain_issue60_isearch_left_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["xx beta yy"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "beta");
+    assert_eq!(
+        search_line(&rl),
+        Some("xx beta yy".into()),
+        "searching beta"
+    );
+
+    // Fini point is the match start (3); Left moves to 2.
+    press(&mut rl, key(KeyCode::Left));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Left leaves search");
+    expect(&rl, "found line kept, Left executed", "xx beta yy", 2);
+
+    type_str(&mut rl, "Q");
+    expect(&rl, "edit after exit", "xxQ beta yy", 3);
+}
+
+/// Regression pin for ruline#60: the search finalizes even when the
+/// pending movement cannot move the point — GNU terminates the search
+/// first (the fini is unconditional, isearch.c:513-524); the command
+/// then dings in place. `C-b` at the match start must still leave the
+/// mode with the found line in the buffer.
+#[test]
+fn chain_issue60_isearch_left_at_match_start_still_exits() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "beta");
+    assert_eq!(search_line(&rl), Some("beta two".into()), "searching beta");
+
+    press(&mut rl, ctrl('b'));
+    assert_eq!(rl.input_mode, InputMode::Regular, "C-b leaves search");
+    expect(&rl, "found line kept, point unmoved", "beta two", 0);
+
+    // Ordinary editing resumes from the finalized state.
+    press(&mut rl, ctrl('e'));
+    expect(&rl, "C-e to line end", "beta two", 8);
+    type_str(&mut rl, "!");
+    expect(&rl, "edit after exit", "beta two!", 9);
+}
+
+/// Regression pin for ruline#60: the standalone `ToEnd` alias event
+/// (no default Emacs keybinding produces it, but hosts send it) is
+/// the same movement class — fini, then execute (isearch.c:513-524).
+#[test]
+fn chain_issue60_isearch_to_end_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("gamma three".into()),
+        "searching gamma"
+    );
+
+    let status = send_event(&mut rl, ReedlineEvent::ToEnd);
+    assert!(matches!(status, EventStatus::Handled), "ToEnd handled");
+    assert_eq!(rl.input_mode, InputMode::Regular, "ToEnd leaves search");
+    expect(&rl, "found line kept, ToEnd executed", "gamma three", 11);
+
+    type_str(&mut rl, " --verbose");
+    expect(&rl, "edit after exit", "gamma three --verbose", 21);
+}
+
+/// Regression pin for ruline#60: the standalone `ToStart` alias with
+/// a mid-line match — fini leaves the point at the match start (3),
+/// and the pending `ToStart` takes it to the line start.
+#[test]
+fn chain_issue60_isearch_to_start_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["xx gamma yy"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("xx gamma yy".into()),
+        "searching gamma"
+    );
+
+    let status = send_event(&mut rl, ReedlineEvent::ToStart);
+    assert!(matches!(status, EventStatus::Handled), "ToStart handled");
+    assert_eq!(rl.input_mode, InputMode::Regular, "ToStart leaves search");
+    expect(&rl, "found line kept, ToStart executed", "xx gamma yy", 0);
+
+    type_str(&mut rl, "Q");
+    expect(&rl, "edit after exit", "Qxx gamma yy", 1);
+}
+
+/// Regression pin for ruline#60: a movement key after a search that
+/// never landed on any entry still terminates the mode — the fini is
+/// a no-op (nothing was found), the pre-search line is what remains,
+/// and the movement executes on it (here pinned at the line end,
+/// where it cannot move). On the base tree the key is swallowed and
+/// the engine stays in search mode over a failed needle.
+#[test]
+fn chain_issue60_isearch_movement_after_failed_search_keeps_line() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    type_str(&mut rl, "draft");
+    expect(&rl, "typed draft", "draft", 5);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "zzz");
+    assert_eq!(rl.input_mode, InputMode::HistorySearch, "still searching");
+    assert_eq!(search_line(&rl), None, "needle never matched");
+
+    press(&mut rl, key(KeyCode::Right));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Right leaves search");
+    expect(&rl, "pre-search line kept", "draft", 5);
+
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "edit after exit", "draf", 4);
+}
+
+/// Regression pin for ruline#60 (noninc side): GNU's non-incremental
+/// search has no fini-then-execute path — `_rl_nsearch_dispatch`
+/// (search.c:308) reads raw characters and its default case inserts
+/// them into the search string; the buffer being edited *is* the
+/// search string. In reedline's event model the standalone movement
+/// events are the aliases of the same movements the `Edit` arm
+/// already applies to that string, so they move the point *within
+/// the search string* and the mode stays `NonIncrementalSearch` —
+/// the class treatment parallel to isearch, on this mode's own
+/// mechanism. On the base tree all four fall to `Inapplicable`.
+#[test]
+fn chain_issue60_noninc_movement_stays_in_search_string() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["alpha one", "beta two", "gamma three"]);
+
+    // M-p opens the backward non-incremental search (search.c:462).
+    press(&mut rl, alt('p'));
+    assert_eq!(rl.input_mode, InputMode::NonIncrementalSearch);
+    expect(&rl, "search string starts empty", "", 0);
+
+    type_str(&mut rl, "beta");
+    expect(&rl, "search string typed", "beta", 4);
+
+    press(&mut rl, key(KeyCode::Left));
+    assert_eq!(
+        rl.input_mode,
+        InputMode::NonIncrementalSearch,
+        "Left stays in the search"
+    );
+    expect(&rl, "Left inside the string", "beta", 3);
+
+    press(&mut rl, key(KeyCode::Right));
+    assert_eq!(rl.input_mode, InputMode::NonIncrementalSearch);
+    expect(&rl, "Right inside the string", "beta", 4);
+
+    let status = send_event(&mut rl, ReedlineEvent::ToStart);
+    assert!(matches!(status, EventStatus::Handled), "ToStart handled");
+    assert_eq!(rl.input_mode, InputMode::NonIncrementalSearch);
+    expect(&rl, "ToStart inside the string", "beta", 0);
+
+    let status = send_event(&mut rl, ReedlineEvent::ToEnd);
+    assert!(matches!(status, EventStatus::Handled), "ToEnd handled");
+    assert_eq!(rl.input_mode, InputMode::NonIncrementalSearch);
+    expect(&rl, "ToEnd inside the string", "beta", 4);
+
+    // The chain still commits as a search for the string as edited:
+    // Enter runs the one backward search and lands on the match,
+    // point at 0 (`rl_point = 0`, search.c:217-219).
+    press(&mut rl, key(KeyCode::Enter));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Enter commits search");
+    expect(&rl, "search landed", "beta two", 0);
 }
 
 // ---------------------------------------------------------------------
