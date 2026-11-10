@@ -8,7 +8,7 @@ use crate::{enums::ReedlineRawEvent, external_printer::ExternalOutput, CursorCon
 use {
     crate::{
         completion::{Completer, CompletionOrigin, CompletionStatus, DefaultCompleter},
-        core_editor::{EditCommandStatus, Editor},
+        core_editor::{EditCommandStatus, EditStack, Editor},
         edit_mode::{EditMode, Emacs},
         enums::{EventStatus, ReedlineEvent},
         highlighter::SimpleMatchHighlighter,
@@ -145,6 +145,23 @@ impl HistoryLastRun {
     fn is_recalled(&self) -> bool {
         matches!(self, Self::Excluded { recalled: true, .. })
     }
+}
+
+/// Identity of the line the editor buffer is showing, keying the
+/// per-position undo stacks saved across history traversal
+/// (issue #57). Tracked beside `history_recall_pos`, which cannot
+/// speak for entries without an id — they read as the live line
+/// there — and does not name the live line as a position of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum HistoryPosition {
+    /// The live line being edited — GNU's saved line while
+    /// traversing (misc.c `_rl_alloc_saved_line`).
+    LiveLine,
+    /// A stored history entry, by id.
+    Entry(HistoryItemId),
+    /// A history entry without an id. Stored items normally carry
+    /// one, so this only keys transient items, by their text.
+    UnsavedEntry(String),
 }
 
 /// `rl_yank_last_arg`'s repeat state (kill.c:653-672 — the function's
@@ -388,6 +405,21 @@ pub struct Reedline {
     // — reedline's `where_history()` for `OperateAndGetNext` and
     // `YankLastArg`. `None` is the live line (fresh or walked back to).
     history_recall_pos: Option<HistoryItemId>,
+
+    // Which line the buffer is currently showing, for the saved
+    // stacks below: the live line, or the history entry landed on.
+    history_position: HistoryPosition,
+
+    // Undo stacks saved per history position while traversing
+    // (issue #57): GNU stores a line's `rl_undo_list` with the line
+    // when traversal leaves it (misc.c:335 `_rl_maybe_replace_line`;
+    // the live line is kept as the saved line, misc.c:395
+    // `_rl_alloc_saved_line`) and reinstalls it when traversal
+    // lands back on the line (misc.c:453 `rl_replace_from_history`).
+    // The stacks live for one `read_line` only: a fresh line starts
+    // with an empty table, so a stack can never be installed on a
+    // different line than the one it was saved from.
+    history_saved_stacks: HashMap<HistoryPosition, EditStack<LineBuffer>>,
 
     // `ReedlineEvent::OperateAndGetNext`'s cross-`read_line` intent
     // (GNU `saved_history_logical_offset`, misc.c:770-789): `Some(id)`
@@ -1131,6 +1163,8 @@ impl Reedline {
             pending_char_search: None,
             yank_last_arg: None,
             history_recall_pos: None,
+            history_position: HistoryPosition::LiveLine,
+            history_saved_stacks: HashMap::new(),
             noninc_search: None,
             noninc_search_string: None,
             noninc_search_pos: None,
@@ -1901,6 +1935,11 @@ impl Reedline {
         // live (unsaved) history position — `where_history()` is fresh —
         // and no previous command exists for `rl_last_func` chains.
         self.history_recall_pos = None;
+        // The per-position undo stacks (issue #57) are saved-line
+        // state for one line's traversal: the new line starts back
+        // on the live line with an empty table.
+        self.history_position = HistoryPosition::LiveLine;
+        self.history_saved_stacks.clear();
         self.yank_last_arg = None;
         self.history_line_search = None;
         // A read that ended mid-collection (host command, suspend)
@@ -3538,6 +3577,7 @@ impl Reedline {
                 let item = item.clone();
                 self.noninc_search_pos = item.id;
                 self.history_recall_pos = item.id;
+                self.history_position = Self::history_position_of(&item);
                 self.editor
                     .set_buffer(item.command_line, UndoBehavior::HistoryNavigation);
                 // `rl_point = 0; rl_mark = rl_end` (search.c:217-219).
@@ -4213,7 +4253,9 @@ impl Reedline {
         self.history_last_run.set_recalled(false);
         if self.input_mode != InputMode::HistoryTraversal {
             self.input_mode = InputMode::HistoryTraversal;
-            if !self.history_cursor_stands_on_buffer_entry() {
+            if !self.history_cursor_stands_on_buffer_entry()
+                && !self.history_cursor_stands_on_displayed_entry()
+            {
                 self.history_cursor = HistoryCursor::new(
                     self.get_history_navigation_based_on_line_buffer(),
                     self.get_history_session_id(),
@@ -4235,8 +4277,7 @@ impl Reedline {
         // History navigation positions the cursor outside the command path, so
         // settle it under the rest policy (vi-normal must not rest past the line).
         self.editor.commit_cursor();
-        self.editor
-            .update_undo_state(UndoBehavior::HistoryNavigation);
+        self.editor.settle_history_landing();
         Ok(())
     }
 
@@ -4248,8 +4289,7 @@ impl Reedline {
         self.editor.move_to_start(false);
         self.editor.move_to_line_end(false);
         self.editor.commit_cursor();
-        self.editor
-            .update_undo_state(UndoBehavior::HistoryNavigation);
+        self.editor.settle_history_landing();
         Ok(())
     }
 
@@ -4265,8 +4305,7 @@ impl Reedline {
         self.update_buffer_from_history();
         self.editor.move_to_end(false);
         self.editor.commit_cursor();
-        self.editor
-            .update_undo_state(UndoBehavior::HistoryNavigation);
+        self.editor.settle_history_landing();
         Ok(())
     }
 
@@ -4275,7 +4314,9 @@ impl Reedline {
     fn start_history_traversal(&mut self) {
         if self.input_mode != InputMode::HistoryTraversal {
             self.input_mode = InputMode::HistoryTraversal;
-            if !self.history_cursor_stands_on_buffer_entry() {
+            if !self.history_cursor_stands_on_buffer_entry()
+                && !self.history_cursor_stands_on_displayed_entry()
+            {
                 self.history_cursor = HistoryCursor::new(
                     self.get_history_navigation_based_on_line_buffer(),
                     self.get_history_session_id(),
@@ -4287,7 +4328,9 @@ impl Reedline {
     fn next_history(&mut self) -> io::Result<()> {
         if self.input_mode != InputMode::HistoryTraversal {
             self.input_mode = InputMode::HistoryTraversal;
-            if !self.history_cursor_stands_on_buffer_entry() {
+            if !self.history_cursor_stands_on_buffer_entry()
+                && !self.history_cursor_stands_on_displayed_entry()
+            {
                 self.history_cursor = HistoryCursor::new(
                     self.get_history_navigation_based_on_line_buffer(),
                     self.get_history_session_id(),
@@ -4317,8 +4360,7 @@ impl Reedline {
         self.editor.move_to_end(false);
         // See `previous_history`: settle the out-of-band cursor under the policy.
         self.editor.commit_cursor();
-        self.editor
-            .update_undo_state(UndoBehavior::HistoryNavigation);
+        self.editor.settle_history_landing();
         Ok(())
     }
 
@@ -4394,6 +4436,7 @@ impl Reedline {
         // cursor that already stands on the buffer's entry instead
         // of restarting the walk at the newest entry.
         if let Some(item) = self.history_cursor.current_item().cloned() {
+            self.history_position = Self::history_position_of(&item);
             let mut cursor = HistoryCursor::new(
                 HistoryNavigationQuery::Normal(self.editor.line_buffer().clone()),
                 self.get_history_session_id(),
@@ -4417,6 +4460,30 @@ impl Reedline {
             .history_cursor
             .string_at_cursor()
             .is_some_and(|line| line == self.editor.get_buffer())
+    }
+
+    /// Whether the history cursor already stands on the entry the
+    /// buffer is showing per `history_position`, regardless of the
+    /// buffer text — the state an edit on a recalled entry leaves
+    /// behind (issue #57): the text moved on from the stored entry,
+    /// but the walk must continue from that entry, not restart from
+    /// a query rebuilt out of the edited text (which would strand
+    /// the walk: the edited text is no entry's prefix, and the
+    /// entry's saved undo stack would never be reached).
+    fn history_cursor_stands_on_displayed_entry(&self) -> bool {
+        if !matches!(
+            self.history_cursor.get_navigation(),
+            HistoryNavigationQuery::Normal(_)
+        ) {
+            return false;
+        }
+        match (&self.history_position, self.history_cursor.current_item()) {
+            (HistoryPosition::Entry(id), Some(item)) => item.id == Some(*id),
+            (HistoryPosition::UnsavedEntry(text), Some(item)) => {
+                item.id.is_none() && item.command_line == *text
+            }
+            _ => false,
+        }
     }
 
     /// The command line of the history entry `skip` entries before the
@@ -4564,6 +4631,7 @@ impl Reedline {
             .and_then(|mut results| results.pop());
         if let Some(item) = next {
             self.history_recall_pos = item.id;
+            self.history_position = Self::history_position_of(&item);
             self.editor
                 .set_buffer(item.command_line.clone(), UndoBehavior::CreateUndoPoint);
             self.history_cursor = HistoryCursor::new(
@@ -4627,6 +4695,9 @@ impl Reedline {
 
         if let Some(found) = self.history_cursor.string_at_cursor() {
             self.history_recall_pos = self.history_cursor.id_at_cursor();
+            if let Some(item) = self.history_cursor.current_item() {
+                self.history_position = Self::history_position_of(item);
+            }
             // GNU's point placement (search.c:635-644): anchored lands
             // on `_rl_history_search_len`; substring lands on the match
             // offset `newcol` (GNU also sets `rl_mark` to the line end,
@@ -4736,6 +4807,42 @@ impl Reedline {
         Ok(())
     }
 
+    /// The [`HistoryPosition`] key for a history item the buffer is
+    /// landed on (issue #57).
+    fn history_position_of(item: &HistoryItem) -> HistoryPosition {
+        match item.id {
+            Some(id) => HistoryPosition::Entry(id),
+            None => HistoryPosition::UnsavedEntry(item.command_line.clone()),
+        }
+    }
+
+    /// Paint a history landing (issue #57): save the editor's undo
+    /// stack under the position being left — GNU stores the line's
+    /// text and `rl_undo_list` with the line on leaving it
+    /// (misc.c:335 `_rl_maybe_replace_line`) — then install the
+    /// stack saved for `landing` earlier in this traversal, if any;
+    /// otherwise run `paint_fresh`, the landing as it behaved
+    /// before saved stacks: a fresh undo floor at the landed text
+    /// (issue #53). "Landing" on the position the buffer already
+    /// shows is not a landing at all: buffer and stack stay exactly
+    /// as they are, edits included.
+    fn paint_history_landing(
+        &mut self,
+        landing: HistoryPosition,
+        paint_fresh: impl FnOnce(&mut Editor),
+    ) {
+        if self.history_position == landing {
+            return;
+        }
+        let leaving = std::mem::replace(&mut self.history_position, landing.clone());
+        self.history_saved_stacks
+            .insert(leaving, self.editor.edit_stack_snapshot());
+        match self.history_saved_stacks.remove(&landing) {
+            Some(saved) => self.editor.land_on_saved_stack(saved),
+            None => paint_fresh(&mut self.editor),
+        }
+    }
+
     /// Set the buffer contents for history traversal/search in the standard prompt
     ///
     /// When using the up/down traversal or fish/zsh style prefix search update the main line buffer accordingly.
@@ -4747,8 +4854,11 @@ impl Reedline {
         self.history_recall_pos = self.history_cursor.id_at_cursor();
         if self.history_last_run.is_recalled() {
             if let HistoryLastRun::Excluded { item, .. } = &self.history_last_run {
-                self.editor
-                    .set_buffer(item.command_line.clone(), UndoBehavior::HistoryNavigation);
+                let item = item.clone();
+                let landing = Self::history_position_of(&item);
+                self.paint_history_landing(landing, |editor| {
+                    editor.set_buffer(item.command_line.clone(), UndoBehavior::HistoryNavigation);
+                });
             }
             return;
         }
@@ -4756,19 +4866,34 @@ impl Reedline {
         match self.history_cursor.get_navigation() {
             HistoryNavigationQuery::Normal(original) => {
                 if let Some(buffer_to_paint) = self.history_cursor.string_at_cursor() {
-                    self.editor
-                        .set_buffer(buffer_to_paint, UndoBehavior::HistoryNavigation);
+                    let landing = self
+                        .history_cursor
+                        .current_item()
+                        .map(Self::history_position_of)
+                        .unwrap_or(HistoryPosition::LiveLine);
+                    self.paint_history_landing(landing, |editor| {
+                        editor.set_buffer(buffer_to_paint, UndoBehavior::HistoryNavigation);
+                    });
                 } else {
-                    // Hack
-                    self.editor
-                        .set_line_buffer(original, UndoBehavior::HistoryNavigation);
+                    // The live line: reinstall its saved stack if
+                    // traversal saved one, else the query's original
+                    // buffer (the pre-traversal line) as before.
+                    self.paint_history_landing(HistoryPosition::LiveLine, |editor| {
+                        editor.set_line_buffer(original, UndoBehavior::HistoryNavigation);
+                    });
                 }
             }
             HistoryNavigationQuery::PrefixSearch(prefix)
             | HistoryNavigationQuery::SubstringSearch(prefix) => {
                 let buffer = self.history_cursor.string_at_cursor().unwrap_or(prefix);
-                self.editor
-                    .set_buffer(buffer, UndoBehavior::HistoryNavigation);
+                let landing = self
+                    .history_cursor
+                    .current_item()
+                    .map(Self::history_position_of)
+                    .unwrap_or(HistoryPosition::LiveLine);
+                self.paint_history_landing(landing, |editor| {
+                    editor.set_buffer(buffer, UndoBehavior::HistoryNavigation);
+                });
             }
         }
     }
