@@ -1,4 +1,4 @@
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditStack<T> {
     /// States before the current one, oldest first.
     undo: Vec<T>,
