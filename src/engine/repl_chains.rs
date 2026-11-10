@@ -1246,9 +1246,6 @@ fn chain_transpose_chars() {
     expect(&rl, "C-t mid-line", "ba", 2);
 }
 
-// TEMPORARY PROBE (not part of the suite): does a bare undo after a
-// history recall cross the recall boundary too?
-
 // ---------------------------------------------------------------------
 // I. Per-entry undo lists across history traversal (issue #57)
 // ---------------------------------------------------------------------
