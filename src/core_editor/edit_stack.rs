@@ -42,12 +42,12 @@ where
     /// `rl_ding` on an empty `rl_undo_list`. The walked states stay on
     /// the redo stack (our undo keeps a redo side GNU lacks).
     ///
-    /// Caveat: the bottom of this stack is the state captured when the
-    /// stack started recording for this line (the session-start
-    /// buffer), not the per-history-entry original GNU keeps in
-    /// `entry->data` — reedline's history navigation coalesces into one
-    /// undo entry per hop, so a recall followed by edits reverts to the
-    /// live line as it was before traversal began.
+    /// The bottom of this stack is the current line's undo floor: the
+    /// state the stack last restarted at. History navigation restarts
+    /// the stack at the landed entry (see
+    /// [`EditStack::restart_at`]), so a recall followed by edits
+    /// reverts to the recalled text, never to the line that was live
+    /// before traversal began.
     pub(super) fn undo_all(&mut self) -> bool {
         if self.undo.is_empty() {
             return false;
@@ -82,6 +82,23 @@ where
         self.undo.clear();
         self.redo.clear();
         self.current = T::default();
+    }
+
+    /// Restart the stack at `state`: it becomes the current state with
+    /// empty undo and redo sides, i.e. the undo floor for everything
+    /// recorded from here on.
+    ///
+    /// This is the history-recall boundary (issue #53): GNU installs
+    /// the fetched entry's own undo list on recall (misc.c
+    /// `rl_replace_from_history` — `rl_undo_list = entry->data`, empty
+    /// for an entry not edited this session), so the recalled text
+    /// itself is where undo and `rl_revert_line` stop. Restarting at
+    /// the landed text models exactly that: nothing recorded before
+    /// the landing can be reached again.
+    pub(super) fn restart_at(&mut self, state: T) {
+        self.undo.clear();
+        self.redo.clear();
+        self.current = state;
     }
 
     /// Return the entry currently being pointed to
@@ -144,6 +161,23 @@ mod test {
     fn undo_all_on_empty_stack_is_a_noop() {
         let mut stack = EditStack::<isize>::new();
         assert!(!stack.undo_all());
+    }
+
+    #[test]
+    fn restart_at_makes_the_state_the_undo_floor() {
+        let mut stack = edit_stack(&[1, 2, 3][..], 1);
+
+        stack.restart_at(9);
+        // Nothing recorded before the restart is reachable any more:
+        // undo has nothing to pop and redo nothing to replay.
+        assert_eq!(*stack.current(), 9);
+        assert_eq!(*stack.undo(), 9);
+        assert_eq!(*stack.redo(), 9);
+        assert!(!stack.undo_all());
+        // Edits after the restart stack on top of the floor as usual.
+        stack.insert(10);
+        assert!(stack.undo_all());
+        assert_eq!(*stack.current(), 9);
     }
 
     #[rstest]
