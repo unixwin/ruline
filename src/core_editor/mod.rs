@@ -23,3 +23,4 @@ pub(crate) use graphemes::{ensure_grapheme_boundary_next, ensure_grapheme_bounda
 pub use line_buffer::LineBuffer;
 pub(crate) use resolve::{operator_span, resolve_motion};
 pub(crate) use rest_policy::{commit, recohere, RestPolicy};
+pub(crate) use word::locate_word;
