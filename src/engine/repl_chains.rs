@@ -165,6 +165,14 @@ fn expect_ring(rl: &Reedline, step: &str, want_slot: &str, want_len: usize) {
     );
 }
 
+/// Send one standalone [`ReedlineEvent`] through the engine's event
+/// entry point, for events no default keybinding produces (a host may
+/// still send them — e.g. the standalone `ToStart`/`ToEnd` aliases).
+fn send_event(rl: &mut Reedline, event: ReedlineEvent) -> EventStatus {
+    let prompt = DefaultPrompt::default();
+    rl.handle_event(&prompt, event).expect("event ok")
+}
+
 // ---------------------------------------------------------------------
 // A. Basic editing chains
 // ---------------------------------------------------------------------
@@ -489,15 +497,15 @@ fn chain_revert_line_clears_fresh_line() {
     expect(&rl, "undo retyped", "", 0);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D1): GNU revert-line undoes
-/// the changes made to *this* line, and a recalled history line
-/// starts a fresh undo boundary — recall `git status`, edit it, and
-/// M-r must give back `git status`. The engine instead reverts past
-/// the recall, emptying the line: the recall itself sits on the
-/// line's undo stack. Kept as the regression seed; do not bend the
-/// expectations to the current behaviour.
+/// GNU revert-line undoes the changes made to *this* line, and a
+/// recalled history line starts a fresh undo boundary: fetching an
+/// entry installs that entry's own undo list (misc.c
+/// `rl_replace_from_history` — `rl_undo_list = entry->data`, empty
+/// for an entry not edited this session), so undo and revert-line
+/// can never cross the recall into the line that was live before
+/// traversal. Recall `git status`, edit it, and M-r must give back
+/// `git status` (issue #53).
 #[test]
-#[ignore = "defect D1: revert-line crosses the history-recall boundary"]
 fn chain_revert_line_restores_recalled_history() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["git status"]);
@@ -514,6 +522,102 @@ fn chain_revert_line_restores_recalled_history() {
     // line is undone in one step.
     press(&mut rl, alt('r'));
     expect(&rl, "M-r reverts", "git status", 10);
+}
+
+#[test]
+fn chain_undo_and_revert_on_untouched_recall_are_noops() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    // The recalled line carries an empty undo list (misc.c
+    // `rl_replace_from_history`): C-_ right after the recall has
+    // nothing to undo and must not touch the line — the recall
+    // itself is not an undoable edit.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo on untouched recall is a no-op", "git status", 10);
+
+    // Same for revert-line on the untouched recall.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r on untouched recall is a no-op", "git status", 10);
+}
+
+#[test]
+fn chain_undo_stops_at_recall_boundary() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    type_str(&mut rl, " -s");
+    press(&mut rl, ctrl('a'));
+    type_str(&mut rl, "x");
+    expect(&rl, "edited recall", "xgit status -s", 1);
+
+    // Undo walks the edits made *since* the recall, newest first,
+    // and stops at the recalled text: the boundary is the floor.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo x", "git status -s", 0);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo suffix", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo at boundary is a no-op", "git status", 10);
+}
+
+#[test]
+fn chain_revert_line_stops_at_each_recall_hop() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status", "git diff"]);
+
+    // Each traversal hop lands on an entry with its own undo
+    // boundary: editing the older entry and reverting gives back
+    // that entry, not the newer one visited in between.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "git diff", 8);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older", "git status", 10);
+
+    type_str(&mut rl, " -s");
+    expect(&rl, "edited older entry", "git status -s", 13);
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r reverts to this hop's entry", "git status", 10);
+}
+
+#[test]
+fn chain_undo_stops_at_recall_boundary_after_typed_prefix() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["git status"]);
+
+    // Type on the live line first, so the pre-recall undo stack is
+    // non-empty when the recall lands (the chains above all recall
+    // from an empty line, where the boundary clear is unobservable).
+    // With a non-empty buffer and the cursor at its end, Up runs a
+    // prefix search on the typed text, so the typed text is a prefix
+    // of the seeded entry; the landing still routes through the same
+    // history-navigation throat.
+    type_str(&mut rl, "git");
+    expect(&rl, "typed live line", "git", 3);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall history", "git status", 10);
+
+    // Edit the recalled line, then undo repeatedly: undo stops at
+    // the recalled text and never crosses into the pre-recall "git".
+    type_str(&mut rl, "!");
+    expect(&rl, "edited recall", "git status!", 11);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo edit", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo at floor is a no-op", "git status", 10);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo still at floor", "git status", 10);
+
+    // Revert-line likewise stops at the floor.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r at floor is a no-op", "git status", 10);
 }
 
 // ---------------------------------------------------------------------
@@ -575,15 +679,14 @@ fn chain_isearch_narrows_per_keystroke() {
     expect(&rl, "accepted line", "alpha one", 0);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D4): after an isearch is
-/// accepted, the history cursor is left desynced — GNU positions
-/// you *on* the found entry, so Up/Down step to its neighbours.
-/// Here Up from the accepted middle entry jumps to a NEWER entry,
-/// Down can leave the buffer showing an entry the cursor no longer
-/// reports, and accepting the newest entry wedges navigation
-/// entirely. Kept as the regression seed with the GNU expectation.
+/// Regression pin for ruline#52 D4: after an isearch is accepted,
+/// the history cursor must stay positioned *on* the found entry —
+/// GNU's `_rl_isearch_fini` moves the history position onto
+/// `last_found_line` (isearch.c:288-291) — so Up/Down step to its
+/// neighbours. (Seed history: PR #51 recorded the desync this pins
+/// against — Up from the accepted middle entry jumped to a NEWER
+/// entry, and accepting the newest entry wedged navigation.)
 #[test]
-#[ignore = "defect D4: history navigation is desynced after isearch accept"]
 fn chain_isearch_accept_positions_history_cursor() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["alpha one", "beta two", "alpha three"]);
@@ -626,17 +729,14 @@ fn chain_isearch_abort_restores_original_line() {
     expect(&rl, "abort restores draft", "draft", 5);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D5): GNU's dispatch
-/// finalizes the search first — found line in the buffer, point at
-/// the match start — and *then* executes the pending command on
-/// it. The engine's fallback (`run_history_commands`) flips to
-/// regular mode and runs the command against the pre-search buffer
-/// without finalizing; the found line is restored afterwards by
-/// the buffer sync, so the command's effect is silently discarded
-/// (C-e here leaves the point at 0 instead of the line end).
-/// Kept as the regression seed with the GNU expectation.
+/// Regression pin for ruline#52 D5: GNU's dispatch finalizes the
+/// search first — found line in the buffer, point at the match
+/// start — and *then* executes the pending command on it
+/// (isearch.c:513-524). (Seed history: PR #51 recorded the engine's
+/// fallback `run_history_commands` running the command against the
+/// pre-search buffer instead, silently discarding its effect —
+/// C-e left the point at 0 instead of the line end.)
 #[test]
-#[ignore = "defect D5: isearch exit-and-execute runs the command on the pre-search buffer, discarding it"]
 fn chain_isearch_command_key_exits_and_executes() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["beta two", "gamma three"]);
@@ -662,15 +762,24 @@ fn chain_isearch_command_key_exits_and_executes() {
     expect(&rl, "edit after exit", "gamma three --verbose", 21);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D2): in GNU, Esc is a
-/// default member of `isearch-terminators` (isearch.c:529-532,
+/// Regression pin for ruline#52 D2: in GNU, Esc is a default
+/// member of `isearch-terminators` (isearch.c:529-532,
 /// "\033\012") — it terminates the search *keeping the found line*;
-/// only C-g (rl_abort) restores the pre-search line. The engine
-/// dispatches abort on the Esc event, so Esc throws the found line
-/// away exactly like C-g. Kept as the regression seed with the GNU
-/// expectation; do not bend it to the current behaviour.
+/// only C-g (rl_abort) restores the pre-search line. (Seed history:
+/// PR #51 recorded Esc throwing the found line away exactly like
+/// C-g, because the keymap layer mapped both keys to the same
+/// event.)
+///
+/// Point expectation corrected against the GNU oracle by the #52
+/// lane: the seed originally expected point 11 (line end) after
+/// Esc, but `_rl_isearch_fini` sets `rl_point = cxt->sline_index`
+/// (isearch.c:302) — the match start — and a PTY probe against GNU
+/// bash 5.3.20 confirms it (C-r `gamma` Esc, then typing `X`,
+/// yields `Xgamma three`: the marker lands at offset 0). The chain
+/// therefore expects the match start after Esc and presses C-e
+/// before typing on, preserving the seed's "the line stays
+/// editable" intent at the GNU-true point.
 #[test]
-#[ignore = "defect D2: Esc aborts isearch instead of terminating it, discarding the found line"]
 fn chain_isearch_escape_keeps_found_line() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["beta two", "gamma three"]);
@@ -683,12 +792,15 @@ fn chain_isearch_escape_keeps_found_line() {
         "searching gamma"
     );
 
-    // Esc terminates the search and keeps the found line for editing.
+    // Esc terminates the search and keeps the found line for
+    // editing, point at the match start (GNU fini, isearch.c:302).
     press(&mut rl, key(KeyCode::Esc));
     assert_eq!(rl.input_mode, InputMode::Regular, "Esc leaves search");
-    expect(&rl, "found line kept", "gamma three", 11);
+    expect(&rl, "found line kept", "gamma three", 0);
 
     // And it is an ordinary line now: editing continues on it.
+    press(&mut rl, ctrl('e'));
+    expect(&rl, "C-e to line end", "gamma three", 11);
     type_str(&mut rl, " --verbose");
     expect(&rl, "edit after Esc", "gamma three --verbose", 21);
 }
@@ -728,15 +840,16 @@ fn chain_isearch_failed_needle_recovers_on_backspace() {
     assert_eq!(rl.input_mode, InputMode::Regular);
 }
 
-/// DEFECT (isolated, see lane REPORT.md D3): when an isearch needle
-/// stops matching, GNU keeps the last successful match on the line
-/// and only flags the prompt as failed. The engine drops the match:
-/// the history cursor loses its entry, and the painter renders an
-/// empty line (`string_at_cursor().unwrap_or_default()` in
-/// `history_search_paint`). Kept as the regression seed with the
-/// GNU expectation.
+/// Regression pin for ruline#52 D3: when an isearch needle stops
+/// matching, GNU keeps the last successful match on the line and
+/// only flags the prompt as failed (isearch.c:863-870: on failure
+/// `history_pos` returns to `last_found_line`, whose line is what
+/// `rl_display_search` shows — PTY-verified against GNU bash
+/// 5.3.20: `(failed reverse-i-search)`betax': beta two`).
+/// (Seed history: PR #51 recorded the engine dropping the match —
+/// the history cursor lost its entry and the painter rendered an
+/// empty line.)
 #[test]
-#[ignore = "defect D3: a failed isearch needle drops the last match instead of displaying it"]
 fn chain_isearch_failed_needle_keeps_last_match() {
     let mut rl = new_rl();
     seed_history(&mut rl, &["alpha one", "beta two"]);
@@ -758,6 +871,246 @@ fn chain_isearch_failed_needle_keeps_last_match() {
         Some("beta two".into()),
         "needle betaxy failed keeps last match"
     );
+}
+
+/// Regression pin for ruline#60: a standalone movement event in
+/// isearch is a base-keymap command that is not `rl_insert`, so GNU's
+/// dispatch stashes it as the pending command, finalizes the search
+/// (found line in the buffer, point at the match start), and then
+/// executes it (isearch.c:513-524). The Right arrow arrives as
+/// `UntilFound([HistoryHintComplete, MenuRight, Right])`; the first
+/// two are inapplicable in search mode, so the chain must resolve at
+/// `Right` — on the base tree every candidate is Inapplicable and the
+/// search swallows the key.
+#[test]
+fn chain_issue60_isearch_right_arrow_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("gamma three".into()),
+        "searching gamma"
+    );
+    assert_eq!(rl.input_mode, InputMode::HistorySearch);
+
+    // Fini puts the point at the match start (0); Right then moves
+    // one grapheme into the found line.
+    press(&mut rl, key(KeyCode::Right));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Right leaves search");
+    expect(&rl, "found line kept, Right executed", "gamma three", 1);
+
+    // And it is an ordinary line now: editing continues on it.
+    type_str(&mut rl, "X");
+    expect(&rl, "edit after exit", "gXamma three", 2);
+}
+
+/// Regression pin for ruline#60: `C-f` spells the same
+/// `UntilFound([HistoryHintComplete, MenuRight, Right])` composite as
+/// the Right arrow, so in isearch it too must finalize the search and
+/// then move — on the base tree its net effect is "accept the search
+/// without moving" at best, and here it does not even leave the mode.
+#[test]
+fn chain_issue60_isearch_ctrl_f_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("gamma three".into()),
+        "searching gamma"
+    );
+
+    press(&mut rl, ctrl('f'));
+    assert_eq!(rl.input_mode, InputMode::Regular, "C-f leaves search");
+    expect(&rl, "found line kept, C-f executed", "gamma three", 1);
+
+    type_str(&mut rl, "X");
+    expect(&rl, "edit after exit", "gXamma three", 2);
+}
+
+/// Regression pin for ruline#60: `Left` after a mid-line match —
+/// fini leaves the point at the match start, and the pending `Left`
+/// moves one grapheme further into the found line (isearch.c:513-524).
+#[test]
+fn chain_issue60_isearch_left_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["xx beta yy"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "beta");
+    assert_eq!(
+        search_line(&rl),
+        Some("xx beta yy".into()),
+        "searching beta"
+    );
+
+    // Fini point is the match start (3); Left moves to 2.
+    press(&mut rl, key(KeyCode::Left));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Left leaves search");
+    expect(&rl, "found line kept, Left executed", "xx beta yy", 2);
+
+    type_str(&mut rl, "Q");
+    expect(&rl, "edit after exit", "xxQ beta yy", 3);
+}
+
+/// Regression pin for ruline#60: the search finalizes even when the
+/// pending movement cannot move the point — GNU terminates the search
+/// first (the fini is unconditional, isearch.c:513-524); the command
+/// then dings in place. `C-b` at the match start must still leave the
+/// mode with the found line in the buffer.
+#[test]
+fn chain_issue60_isearch_left_at_match_start_still_exits() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "beta");
+    assert_eq!(search_line(&rl), Some("beta two".into()), "searching beta");
+
+    press(&mut rl, ctrl('b'));
+    assert_eq!(rl.input_mode, InputMode::Regular, "C-b leaves search");
+    expect(&rl, "found line kept, point unmoved", "beta two", 0);
+
+    // Ordinary editing resumes from the finalized state.
+    press(&mut rl, ctrl('e'));
+    expect(&rl, "C-e to line end", "beta two", 8);
+    type_str(&mut rl, "!");
+    expect(&rl, "edit after exit", "beta two!", 9);
+}
+
+/// Regression pin for ruline#60: the standalone `ToEnd` alias event
+/// (no default Emacs keybinding produces it, but hosts send it) is
+/// the same movement class — fini, then execute (isearch.c:513-524).
+#[test]
+fn chain_issue60_isearch_to_end_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("gamma three".into()),
+        "searching gamma"
+    );
+
+    let status = send_event(&mut rl, ReedlineEvent::ToEnd);
+    assert!(matches!(status, EventStatus::Handled), "ToEnd handled");
+    assert_eq!(rl.input_mode, InputMode::Regular, "ToEnd leaves search");
+    expect(&rl, "found line kept, ToEnd executed", "gamma three", 11);
+
+    type_str(&mut rl, " --verbose");
+    expect(&rl, "edit after exit", "gamma three --verbose", 21);
+}
+
+/// Regression pin for ruline#60: the standalone `ToStart` alias with
+/// a mid-line match — fini leaves the point at the match start (3),
+/// and the pending `ToStart` takes it to the line start.
+#[test]
+fn chain_issue60_isearch_to_start_exits_and_moves() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["xx gamma yy"]);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "gamma");
+    assert_eq!(
+        search_line(&rl),
+        Some("xx gamma yy".into()),
+        "searching gamma"
+    );
+
+    let status = send_event(&mut rl, ReedlineEvent::ToStart);
+    assert!(matches!(status, EventStatus::Handled), "ToStart handled");
+    assert_eq!(rl.input_mode, InputMode::Regular, "ToStart leaves search");
+    expect(&rl, "found line kept, ToStart executed", "xx gamma yy", 0);
+
+    type_str(&mut rl, "Q");
+    expect(&rl, "edit after exit", "Qxx gamma yy", 1);
+}
+
+/// Regression pin for ruline#60: a movement key after a search that
+/// never landed on any entry still terminates the mode — the fini is
+/// a no-op (nothing was found), the pre-search line is what remains,
+/// and the movement executes on it (here pinned at the line end,
+/// where it cannot move). On the base tree the key is swallowed and
+/// the engine stays in search mode over a failed needle.
+#[test]
+fn chain_issue60_isearch_movement_after_failed_search_keeps_line() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["beta two", "gamma three"]);
+
+    type_str(&mut rl, "draft");
+    expect(&rl, "typed draft", "draft", 5);
+
+    press(&mut rl, ctrl('r'));
+    type_str(&mut rl, "zzz");
+    assert_eq!(rl.input_mode, InputMode::HistorySearch, "still searching");
+    assert_eq!(search_line(&rl), None, "needle never matched");
+
+    press(&mut rl, key(KeyCode::Right));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Right leaves search");
+    expect(&rl, "pre-search line kept", "draft", 5);
+
+    press(&mut rl, key(KeyCode::Backspace));
+    expect(&rl, "edit after exit", "draf", 4);
+}
+
+/// Regression pin for ruline#60 (noninc side): GNU's non-incremental
+/// search has no fini-then-execute path — `_rl_nsearch_dispatch`
+/// (search.c:308) reads raw characters and its default case inserts
+/// them into the search string; the buffer being edited *is* the
+/// search string. In reedline's event model the standalone movement
+/// events are the aliases of the same movements the `Edit` arm
+/// already applies to that string, so they move the point *within
+/// the search string* and the mode stays `NonIncrementalSearch` —
+/// the class treatment parallel to isearch, on this mode's own
+/// mechanism. On the base tree all four fall to `Inapplicable`.
+#[test]
+fn chain_issue60_noninc_movement_stays_in_search_string() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["alpha one", "beta two", "gamma three"]);
+
+    // M-p opens the backward non-incremental search (search.c:462).
+    press(&mut rl, alt('p'));
+    assert_eq!(rl.input_mode, InputMode::NonIncrementalSearch);
+    expect(&rl, "search string starts empty", "", 0);
+
+    type_str(&mut rl, "beta");
+    expect(&rl, "search string typed", "beta", 4);
+
+    press(&mut rl, key(KeyCode::Left));
+    assert_eq!(
+        rl.input_mode,
+        InputMode::NonIncrementalSearch,
+        "Left stays in the search"
+    );
+    expect(&rl, "Left inside the string", "beta", 3);
+
+    press(&mut rl, key(KeyCode::Right));
+    assert_eq!(rl.input_mode, InputMode::NonIncrementalSearch);
+    expect(&rl, "Right inside the string", "beta", 4);
+
+    let status = send_event(&mut rl, ReedlineEvent::ToStart);
+    assert!(matches!(status, EventStatus::Handled), "ToStart handled");
+    assert_eq!(rl.input_mode, InputMode::NonIncrementalSearch);
+    expect(&rl, "ToStart inside the string", "beta", 0);
+
+    let status = send_event(&mut rl, ReedlineEvent::ToEnd);
+    assert!(matches!(status, EventStatus::Handled), "ToEnd handled");
+    assert_eq!(rl.input_mode, InputMode::NonIncrementalSearch);
+    expect(&rl, "ToEnd inside the string", "beta", 4);
+
+    // The chain still commits as a search for the string as edited:
+    // Enter runs the one backward search and lands on the match,
+    // point at 0 (`rl_point = 0`, search.c:217-219).
+    press(&mut rl, key(KeyCode::Enter));
+    assert_eq!(rl.input_mode, InputMode::Regular, "Enter commits search");
+    expect(&rl, "search landed", "beta two", 0);
 }
 
 // ---------------------------------------------------------------------
@@ -1141,5 +1494,207 @@ fn chain_transpose_chars() {
     expect(&rl, "C-t mid-line", "ba", 2);
 }
 
-// TEMPORARY PROBE (not part of the suite): does a bare undo after a
-// history recall cross the recall boundary too?
+// ---------------------------------------------------------------------
+// I. Per-entry undo lists across history traversal (issue #57)
+// ---------------------------------------------------------------------
+//
+// GNU readline saves each line's undo list with the line when
+// traversal leaves it, and reinstalls that list when traversal lands
+// back on it: leaving an edited history entry stores the edited text
+// plus `rl_undo_list` into the entry (misc.c
+// `_rl_maybe_replace_line`), landing installs the entry's saved list
+// (misc.c `rl_replace_from_history` — `rl_undo_list = entry->data`),
+// and the live line the traversal started from is kept as the saved
+// line (misc.c `_rl_alloc_saved_line`) and restored — text and undo
+// list — when traversal walks back past the newest entry (misc.c
+// `rl_maybe_unsave_line`). Issue #53 (PR #54) made a landing restart
+// the undo stack at the landed text; that covers entries never
+// edited this session, whose saved list is empty. The chains below
+// pin the saved-list layer on top of it: an edited entry revisited
+// must offer the edits made before leaving it to C-_ / M-r, and so
+// must the draft line.
+
+#[test]
+fn chain_undo_on_revisited_entry_restores_saved_list() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older entry", "first entry", 11);
+
+    // Edit the older entry, then hop away: GNU stores the edited
+    // text and its undo list into the entry on leaving.
+    type_str(&mut rl, " -x");
+    expect(&rl, "edited older entry", "first entry -x", 14);
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "hop to newest", "second entry", 12);
+
+    // Landing back on the entry restores the edited text...
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "back on edited entry", "first entry -x", 14);
+
+    // ...and its saved undo list: C-_ undoes the edit made before
+    // leaving, then the list is exhausted.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo restores pre-edit text", "first entry", 11);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "saved list exhausted is a no-op", "first entry", 11);
+    press(&mut rl, alt('r'));
+    expect(&rl, "revert after undo is a no-op", "first entry", 11);
+}
+
+#[test]
+fn chain_revert_line_on_revisited_entry_restores_saved_list() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older entry", "first entry", 11);
+
+    type_str(&mut rl, " -x");
+    expect(&rl, "edited older entry", "first entry -x", 14);
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "hop to newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "back on edited entry", "first entry -x", 14);
+
+    // Revert-line walks the entry's whole saved undo list in one
+    // step, back to the entry's original text.
+    press(&mut rl, alt('r'));
+    expect(&rl, "M-r reverts the saved edits", "first entry", 11);
+}
+
+#[test]
+fn chain_edited_entries_keep_separate_undo_lists() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    // Edit the newest entry, hop to the older one and edit that too:
+    // each entry keeps its own saved text and undo list.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    type_str(&mut rl, " -b");
+    expect(&rl, "edited newest entry", "second entry -b", 15);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "hop to older entry", "first entry", 11);
+    type_str(&mut rl, " -a");
+    expect(&rl, "edited older entry", "first entry -a", 14);
+
+    // Back on the newest entry: its edited text is intact, and C-_
+    // undoes only its own edit.
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "back on edited newest", "second entry -b", 15);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo newest entry's edit", "second entry", 12);
+
+    // The older entry's saved edit survived the round trip and is
+    // still undoable on its own list.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "older entry still edited", "first entry -a", 14);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo older entry's edit", "first entry", 11);
+}
+
+#[test]
+fn chain_undo_on_draft_line_survives_history_roundtrip() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    // A hand-typed draft with two discrete edits (two pastes, the
+    // unit model of chain_undo_walks_back_step_by_step).
+    paste(&mut rl, "one ");
+    expect(&rl, "draft first paste", "one ", 4);
+    paste(&mut rl, "two");
+    expect(&rl, "draft second paste", "one two", 7);
+
+    // Enter the walk with the point off the end of the line: plain
+    // Up on a non-empty line whose point sits at the end is this
+    // engine's prefix search by design (see
+    // `get_history_navigation_based_on_line_buffer`), which is not
+    // what this chain pins — the saved-line undo restore is.
+    press(&mut rl, ctrl('a'));
+    expect(&rl, "draft point to start", "one two", 0);
+
+    // Traversal starts: GNU saves the draft line and its undo list
+    // as the saved line. Walking back down restores both.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "back on draft", "one two", 7);
+
+    // C-_ now undoes the draft's own edits, newest first — the
+    // history visit in between is invisible to the draft's list.
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo draft's second paste", "one ", 4);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo draft's first paste", "", 0);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "draft list exhausted is a no-op", "", 0);
+}
+
+#[test]
+fn chain_end_of_history_restores_draft_and_its_undo_list() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    paste(&mut rl, "one ");
+    paste(&mut rl, "two");
+    expect(&rl, "draft typed", "one two", 7);
+
+    // Point off the end, as in the round-trip chain above, so the
+    // walk below is a plain walk and not a prefix search.
+    press(&mut rl, ctrl('a'));
+    expect(&rl, "draft point to start", "one two", 0);
+
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older entry", "first entry", 11);
+
+    // M-> (GNU end-of-history, misc.c `rl_end_of_history`) jumps
+    // straight back to the saved live line, undo list included.
+    press(&mut rl, alt('>'));
+    expect(&rl, "M-> restores draft", "one two", 7);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo draft's second paste", "one ", 4);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo draft's first paste", "", 0);
+}
+
+#[test]
+fn chain_untouched_entries_stay_undo_noops_after_hops() {
+    let mut rl = new_rl();
+    seed_history(&mut rl, &["first entry", "second entry"]);
+
+    // Hopping between entries never edited this session installs an
+    // empty saved list at every landing (the #53 boundary, kept
+    // under traversal): undo and revert are no-ops everywhere.
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall newest", "second entry", 12);
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "recall older entry", "first entry", 11);
+    press(&mut rl, key(KeyCode::Down));
+    expect(&rl, "hop back to newest", "second entry", 12);
+    press(&mut rl, ctrl('_'));
+    expect(
+        &rl,
+        "undo on untouched newest is a no-op",
+        "second entry",
+        12,
+    );
+    press(&mut rl, alt('r'));
+    expect(
+        &rl,
+        "revert on untouched newest is a no-op",
+        "second entry",
+        12,
+    );
+    press(&mut rl, key(KeyCode::Up));
+    expect(&rl, "hop back to older entry", "first entry", 11);
+    press(&mut rl, ctrl('_'));
+    expect(&rl, "undo on untouched older is a no-op", "first entry", 11);
+}

@@ -132,6 +132,13 @@ impl HistoryCursor {
         self.current = Some(item);
     }
 
+    /// The entry the cursor currently stands on, if any — the
+    /// engine's isearch fini reads it to reseed a traversal cursor
+    /// onto the found entry.
+    pub(crate) fn current_item(&self) -> Option<&HistoryItem> {
+        self.current.as_ref()
+    }
+
     /// Poll the current [`HistoryNavigationQuery`] mode
     pub fn get_navigation(&self) -> HistoryNavigationQuery {
         self.query.clone()

@@ -581,6 +581,9 @@ mod tests {
 
     #[test]
     fn macro_definition_replay_and_print_escape() {
+        // The macro/input state is a process-global singleton (ruline#28):
+        // serialize against the other tests that drive it.
+        let _input_state = state::input_state_test_lock();
         reset();
         // SAFETY: the test lock is not shared with other ABI tests here, and
         // these are the same globals the C ABI uses.
@@ -618,6 +621,7 @@ mod tests {
 
     #[test]
     fn push_macro_input_reads_in_order_and_restores_previous() {
+        let _input_state = state::input_state_test_lock();
         reset();
         let first = owned_macro("one");
         // SAFETY: the pointer is malloc storage and ownership transfers.
@@ -637,6 +641,7 @@ mod tests {
 
     #[test]
     fn command_name_reader_handles_backspace() {
+        let _input_state = state::input_state_test_lock();
         reset();
         let name = owned_macro("forward-chax\x7fr\n");
         // SAFETY: ownership transfers to the macro input stack.
@@ -647,6 +652,7 @@ mod tests {
 
     #[test]
     fn bracketed_text_strips_closing_sequence() {
+        let _input_state = state::input_state_test_lock();
         reset();
         let pasted = owned_macro("hello\x1b[201~tail");
         // SAFETY: ownership transfers to the macro input stack.

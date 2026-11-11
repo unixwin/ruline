@@ -16,6 +16,7 @@ mod a6_probe;
 pub(crate) use clip_buffer::get_system_clipboard;
 pub(crate) use clip_buffer::{Clipboard, LocalClipboard};
 pub(crate) use cursor::{CaretGeometry, Cursor, Movement, SelectionExtent};
+pub(crate) use edit_stack::EditStack;
 pub(crate) use editor::EditCommandStatus;
 pub use editor::Editor;
 pub(crate) use graphemes::{ensure_grapheme_boundary_next, ensure_grapheme_boundary_prev};

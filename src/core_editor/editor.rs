@@ -1147,6 +1147,22 @@ impl Editor {
             self.insert_undo_run = 0;
             return;
         }
+        if matches!(undo_behavior, UndoBehavior::HistoryNavigation) {
+            // Every history landing funnels through here with the
+            // landed text already in the line buffer (the callers set
+            // the buffer first). GNU installs the fetched entry's own
+            // undo list at that moment (misc.c
+            // `rl_replace_from_history` — `rl_undo_list =
+            // entry->data`, empty for an entry not edited this
+            // session), so the landing is not an edit to record but a
+            // boundary to restart the stack at: undo and revert-line
+            // stop at the recalled text and can never cross into the
+            // line that was live before traversal (issue #53).
+            self.edit_stack.restart_at(self.line_buffer.clone());
+            self.last_undo_behavior = UndoBehavior::HistoryNavigation;
+            self.insert_undo_run = 0;
+            return;
+        }
         // GNU's insert cap (text.c:110): a single-char insert concatenates
         // into the open UNDO_INSERT entry only while that entry holds
         // fewer than 20 chars — at 20 the entry closes and this insert
@@ -1181,6 +1197,45 @@ impl Editor {
             _ => 0,
         };
         self.last_undo_behavior = undo_behavior;
+    }
+
+    /// Snapshot of the undo stack, taken by the engine when history
+    /// traversal leaves the line the buffer is showing, so the stack
+    /// can be reinstalled if traversal lands back on that line
+    /// (issue #57 — GNU stores the line's `rl_undo_list` with the
+    /// line on leaving it, misc.c `_rl_maybe_replace_line`).
+    pub(crate) fn edit_stack_snapshot(&self) -> EditStack<LineBuffer> {
+        self.edit_stack.clone()
+    }
+
+    /// Land the buffer on an undo stack saved when traversal last
+    /// left this position (issue #57): the saved stack becomes the
+    /// editor's undo stack wholesale and the buffer takes the
+    /// stack's current state — GNU `rl_replace_from_history`
+    /// installing the entry's saved list as `rl_undo_list`
+    /// (misc.c:453). The undo bookkeeping settles the way a plain
+    /// history landing settles it, so the next edit starts a fresh
+    /// insert run on the installed list.
+    pub(crate) fn land_on_saved_stack(&mut self, mut stack: EditStack<LineBuffer>) {
+        self.line_buffer = stack.current().clone();
+        self.edit_stack = stack;
+        // History navigation replaces the buffer outside the command
+        // path, so normalize the cursor the way `set_buffer` does.
+        self.commit_cursor();
+        self.last_undo_behavior = UndoBehavior::HistoryNavigation;
+        self.insert_undo_run = 0;
+    }
+
+    /// Settle the undo bookkeeping after a history landing whose
+    /// stack work is already done — the landing itself went through
+    /// `set_buffer` (fresh floor) or `land_on_saved_stack`
+    /// (installed list). The navigation entry points call this after
+    /// their cursor placement; a second full `HistoryNavigation`
+    /// handling there would restart an installed stack back to a
+    /// bare floor.
+    pub(crate) fn settle_history_landing(&mut self) {
+        self.last_undo_behavior = UndoBehavior::HistoryNavigation;
+        self.insert_undo_run = 0;
     }
 
     // The dedicated `*Linewise` cut/copy methods below back the legacy public

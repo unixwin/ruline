@@ -8,7 +8,7 @@ use crate::{enums::ReedlineRawEvent, external_printer::ExternalOutput, CursorCon
 use {
     crate::{
         completion::{Completer, CompletionOrigin, CompletionStatus, DefaultCompleter},
-        core_editor::{EditCommandStatus, Editor},
+        core_editor::{EditCommandStatus, EditStack, Editor},
         edit_mode::{EditMode, Emacs},
         enums::{EventStatus, ReedlineEvent},
         highlighter::SimpleMatchHighlighter,
@@ -145,6 +145,23 @@ impl HistoryLastRun {
     fn is_recalled(&self) -> bool {
         matches!(self, Self::Excluded { recalled: true, .. })
     }
+}
+
+/// Identity of the line the editor buffer is showing, keying the
+/// per-position undo stacks saved across history traversal
+/// (issue #57). Tracked beside `history_recall_pos`, which cannot
+/// speak for entries without an id — they read as the live line
+/// there — and does not name the live line as a position of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum HistoryPosition {
+    /// The live line being edited — GNU's saved line while
+    /// traversing (misc.c `_rl_alloc_saved_line`).
+    LiveLine,
+    /// A stored history entry, by id.
+    Entry(HistoryItemId),
+    /// A history entry without an id. Stored items normally carry
+    /// one, so this only keys transient items, by their text.
+    UnsavedEntry(String),
 }
 
 /// `rl_yank_last_arg`'s repeat state (kill.c:653-672 — the function's
@@ -388,6 +405,21 @@ pub struct Reedline {
     // — reedline's `where_history()` for `OperateAndGetNext` and
     // `YankLastArg`. `None` is the live line (fresh or walked back to).
     history_recall_pos: Option<HistoryItemId>,
+
+    // Which line the buffer is currently showing, for the saved
+    // stacks below: the live line, or the history entry landed on.
+    history_position: HistoryPosition,
+
+    // Undo stacks saved per history position while traversing
+    // (issue #57): GNU stores a line's `rl_undo_list` with the line
+    // when traversal leaves it (misc.c:335 `_rl_maybe_replace_line`;
+    // the live line is kept as the saved line, misc.c:395
+    // `_rl_alloc_saved_line`) and reinstalls it when traversal
+    // lands back on the line (misc.c:453 `rl_replace_from_history`).
+    // The stacks live for one `read_line` only: a fresh line starts
+    // with an empty table, so a stack can never be installed on a
+    // different line than the one it was saved from.
+    history_saved_stacks: HashMap<HistoryPosition, EditStack<LineBuffer>>,
 
     // `ReedlineEvent::OperateAndGetNext`'s cross-`read_line` intent
     // (GNU `saved_history_logical_offset`, misc.c:770-789): `Some(id)`
@@ -1131,6 +1163,8 @@ impl Reedline {
             pending_char_search: None,
             yank_last_arg: None,
             history_recall_pos: None,
+            history_position: HistoryPosition::LiveLine,
+            history_saved_stacks: HashMap::new(),
             noninc_search: None,
             noninc_search_string: None,
             noninc_search_pos: None,
@@ -1901,6 +1935,11 @@ impl Reedline {
         // live (unsaved) history position — `where_history()` is fresh —
         // and no previous command exists for `rl_last_func` chains.
         self.history_recall_pos = None;
+        // The per-position undo stacks (issue #57) are saved-line
+        // state for one line's traversal: the new line starts back
+        // on the live line with an empty table.
+        self.history_position = HistoryPosition::LiveLine;
+        self.history_saved_stacks.clear();
         self.yank_last_arg = None;
         self.history_line_search = None;
         // A read that ended mid-collection (host command, suspend)
@@ -3082,7 +3121,7 @@ impl Reedline {
             _ => {}
         }
         let status = if self.input_mode == InputMode::HistorySearch {
-            self.handle_history_search_event(event)
+            self.handle_history_search_event(prompt, event)
         } else if self.input_mode == InputMode::NonIncrementalSearch {
             self.handle_noninc_search_event(event)
         } else {
@@ -3102,11 +3141,15 @@ impl Reedline {
         status
     }
 
-    fn handle_history_search_event(&mut self, event: ReedlineEvent) -> io::Result<EventStatus> {
+    fn handle_history_search_event(
+        &mut self,
+        prompt: &dyn Prompt,
+        event: ReedlineEvent,
+    ) -> io::Result<EventStatus> {
         match event {
             ReedlineEvent::UntilFound(events) => {
                 for event in events {
-                    match self.handle_history_search_event(event)? {
+                    match self.handle_history_search_event(prompt, event)? {
                         EventStatus::Inapplicable => {
                             // Try again with the next event handler
                         }
@@ -3125,7 +3168,7 @@ impl Reedline {
                 // and chord-timeout flushes arrive as `Multiple`).
                 let mut latest_signal = EventStatus::Inapplicable;
                 for event in events {
-                    match self.handle_history_search_event(event)? {
+                    match self.handle_history_search_event(prompt, event)? {
                         EventStatus::Inapplicable => {}
                         EventStatus::Exits(signal) => {
                             return Ok(EventStatus::Exits(signal));
@@ -3160,37 +3203,9 @@ impl Reedline {
                 Ok(EventStatus::Handled)
             }
             ReedlineEvent::Enter
-            | ReedlineEvent::HistoryHintComplete
             | ReedlineEvent::Submit
             | ReedlineEvent::SubmitOrNewline => {
-                if let Some(string) = self.history_cursor.string_at_cursor() {
-                    // GNU `_rl_isearch_fini` (isearch.c:300-304) leaves
-                    // point at `cxt->sline_index` — the start of the
-                    // matched substring — not at the end of the recalled
-                    // line. Reverse isearch scans a fresh history line
-                    // from its right edge (isearch.c:854
-                    // `sline_len - search_string_index`), so the last
-                    // occurrence is the one it landed on.
-                    let point = match self.history_cursor.get_navigation() {
-                        HistoryNavigationQuery::SubstringSearch(needle) if !needle.is_empty() => {
-                            string.rfind(&needle).unwrap_or(string.len())
-                        }
-                        _ => string.len(),
-                    };
-                    self.editor
-                        .set_buffer(string, UndoBehavior::CreateUndoPoint);
-                    let point = point.min(self.editor.get_buffer().len());
-                    self.editor.edit_buffer(
-                        |buf| buf.set_insertion_point(point),
-                        UndoBehavior::MoveCursor,
-                    );
-                    self.editor.commit_cursor();
-                }
-                // Accepting an isearch match leaves the history position
-                // on the found entry (GNU's isearch lands `where_history`
-                // there too), which `OperateAndGetNext`/`YankLastArg` read.
-                self.history_recall_pos = self.history_cursor.id_at_cursor();
-
+                self.finalize_history_search();
                 self.input_mode = InputMode::Regular;
                 Ok(EventStatus::Handled)
             }
@@ -3244,6 +3259,20 @@ impl Reedline {
                 Ok(EventStatus::Handled)
             }
             ReedlineEvent::Esc => {
+                // Esc is a default member of `isearch-terminators`
+                // (isearch.c:77, 526-553): it terminates the search
+                // *keeping the found line* — the fini below — and is
+                // not itself executed as a command. Only `rl_abort`
+                // (C-g) restores the pre-search line.
+                self.finalize_history_search();
+                self.input_mode = InputMode::Regular;
+                Ok(EventStatus::Handled)
+            }
+            ReedlineEvent::Abort => {
+                // GNU `rl_abort` (C-g): cancel the search and restore
+                // the pre-search line. The editor buffer was never
+                // touched while searching, so leaving the mode is the
+                // whole restore.
                 self.input_mode = InputMode::Regular;
                 Ok(EventStatus::Handled)
             }
@@ -3259,12 +3288,32 @@ impl Reedline {
                 self.input_mode = InputMode::Regular;
                 Ok(EventStatus::Handled)
             }
-            // TODO: Check if events should be handled
+            // GNU's isearch dispatch (isearch.c:513-524): a standalone
+            // movement event is a base-keymap command that is not
+            // `rl_insert`, so it terminates the search and is then
+            // executed as the pending command — the same
+            // fini-then-execute path the `run_history_commands`
+            // fallback arm gives `Edit` commands (ruline#52 D5), here
+            // for the alias events. `C-f` and the Right arrow both
+            // arrive as `UntilFound([HistoryHintComplete, MenuRight,
+            // Right])` and resolve at this arm. The fini is
+            // unconditional, so the event reports Handled even when
+            // the movement itself has nowhere to go: the search is
+            // over either way, and an enclosing `UntilFound` must not
+            // try further candidates against a state that no longer
+            // exists. Movement semantics delegate to the regular-mode
+            // arms rather than being re-implemented here.
             ReedlineEvent::Right
             | ReedlineEvent::Left
             | ReedlineEvent::ToStart
-            | ReedlineEvent::ToEnd
-            | ReedlineEvent::KeySequence(_)
+            | ReedlineEvent::ToEnd => {
+                self.finalize_history_search();
+                self.input_mode = InputMode::Regular;
+                let _ = self.handle_editor_event(prompt, event)?;
+                Ok(EventStatus::Handled)
+            }
+            // TODO: Check if events should be handled
+            ReedlineEvent::KeySequence(_)
             | ReedlineEvent::QuotedInsert
             | ReedlineEvent::CharSearch { .. }
             | ReedlineEvent::YankLastArg { .. }
@@ -3284,6 +3333,15 @@ impl Reedline {
             | ReedlineEvent::PrintLastKbdMacro
             | ReedlineEvent::None
             | ReedlineEvent::HistoryHintWordComplete
+            // No hint is shown in search mode, so there is nothing for
+            // hint completion to complete: the event is inapplicable
+            // here, which is what lets a composite key fall through to
+            // its payload — `C-e` parses to
+            // `UntilFound([HistoryHintComplete, Edit(MoveToLineEnd)])`,
+            // and GNU executes the movement after terminating the
+            // search (isearch.c:513-524); it does not accept the search
+            // in the movement's place.
+            | ReedlineEvent::HistoryHintComplete
             | ReedlineEvent::OpenEditor
             | ReedlineEvent::Menu(_)
             | ReedlineEvent::MenuAccept
@@ -3367,10 +3425,11 @@ impl Reedline {
                 self.restore_noninc_saved_line(state);
                 self.noninc_dosearch(&string, direction, pattern, from)
             }
-            ReedlineEvent::CtrlC | ReedlineEvent::Esc => {
+            ReedlineEvent::CtrlC | ReedlineEvent::Esc | ReedlineEvent::Abort => {
                 // `_rl_nsearch_abort` (search.c:270): saved line and
-                // point back, prompt restored. `C-g` reaches this arm as
-                // `Esc` — GNU's abort key, not a `Redo` edit.
+                // point back, prompt restored. In a *non*-incremental
+                // search Esc and `C-g` (abort) coincide — both cancel
+                // and restore, unlike in isearch.
                 if let Some(state) = self.noninc_search.take() {
                     self.restore_noninc_saved_line(state);
                 }
@@ -3426,6 +3485,41 @@ impl Reedline {
             ReedlineEvent::ClearScrollback => {
                 self.painter.clear_scrollback()?;
                 Ok(EventStatus::Handled)
+            }
+            ReedlineEvent::Left | ReedlineEvent::Right => {
+                // GNU's `_rl_nsearch_dispatch` (search.c:308) has no
+                // fini-then-execute path: it dispatches on raw
+                // characters and inserts anything unlisted into the
+                // search string — the buffer being edited *is* the
+                // string, and the search has not run yet. In this
+                // event model the standalone movements are the aliases
+                // of the movements the `Edit` arm above already applies
+                // to that string, so they move the point within it and
+                // the search stays open, with the regular-mode arms'
+                // implementation and status semantics (ruline#60).
+                let command = if event == ReedlineEvent::Left {
+                    EditCommand::MoveLeft { select: false }
+                } else {
+                    EditCommand::MoveRight { select: false }
+                };
+                Ok(self.run_edit_commands_with_status(&[command]).into())
+            }
+            ReedlineEvent::ToStart | ReedlineEvent::ToEnd => {
+                // Same class as above, mirroring the regular-mode
+                // `ToStart`/`ToEnd` arm: direct editor moves (no undo
+                // point, no mode change), Handled iff the point moved.
+                let initial_cursor = self.editor.line_buffer().cursor();
+                if event == ReedlineEvent::ToStart {
+                    self.editor.move_to_start(false);
+                } else {
+                    self.editor.move_to_end(false);
+                }
+                self.editor.commit_cursor();
+                Ok(if self.editor.line_buffer().cursor() == initial_cursor {
+                    EventStatus::Inapplicable
+                } else {
+                    EventStatus::Handled
+                })
             }
             // Anything else GNU would read as a literal input byte has
             // no reedline form; the event is ignored, as a key with no
@@ -3542,6 +3636,7 @@ impl Reedline {
                 let item = item.clone();
                 self.noninc_search_pos = item.id;
                 self.history_recall_pos = item.id;
+                self.history_position = Self::history_position_of(&item);
                 self.editor
                     .set_buffer(item.command_line, UndoBehavior::HistoryNavigation);
                 // `rl_point = 0; rl_mark = rl_end` (search.c:217-219).
@@ -3781,6 +3876,15 @@ impl Reedline {
             ReedlineEvent::HistoryHintComplete => Ok(self.accept_history_hint(true)),
             ReedlineEvent::HistoryHintWordComplete => Ok(self.accept_history_hint(false)),
             ReedlineEvent::Esc => {
+                self.deactivate_menus();
+                self.editor.clear_selection();
+                Ok(EventStatus::Handled)
+            }
+            ReedlineEvent::Abort => {
+                // GNU `rl_abort` outside a search: cancel the current
+                // transient state, as Esc does here. (Inside the two
+                // search modes the arms diverge — see
+                // `handle_history_search_event`.)
                 self.deactivate_menus();
                 self.editor.clear_selection();
                 Ok(EventStatus::Handled)
@@ -4221,10 +4325,14 @@ impl Reedline {
         self.history_last_run.set_recalled(false);
         if self.input_mode != InputMode::HistoryTraversal {
             self.input_mode = InputMode::HistoryTraversal;
-            self.history_cursor = HistoryCursor::new(
-                self.get_history_navigation_based_on_line_buffer(),
-                self.get_history_session_id(),
-            );
+            if !self.history_cursor_stands_on_buffer_entry()
+                && !self.history_cursor_stands_on_displayed_entry()
+            {
+                self.history_cursor = HistoryCursor::new(
+                    self.get_history_navigation_based_on_line_buffer(),
+                    self.get_history_session_id(),
+                );
+            }
 
             if matches!(self.history_last_run, HistoryLastRun::Excluded { .. }) {
                 self.history_last_run.set_recalled(true);
@@ -4241,8 +4349,7 @@ impl Reedline {
         // History navigation positions the cursor outside the command path, so
         // settle it under the rest policy (vi-normal must not rest past the line).
         self.editor.commit_cursor();
-        self.editor
-            .update_undo_state(UndoBehavior::HistoryNavigation);
+        self.editor.settle_history_landing();
         Ok(())
     }
 
@@ -4254,8 +4361,7 @@ impl Reedline {
         self.editor.move_to_start(false);
         self.editor.move_to_line_end(false);
         self.editor.commit_cursor();
-        self.editor
-            .update_undo_state(UndoBehavior::HistoryNavigation);
+        self.editor.settle_history_landing();
         Ok(())
     }
 
@@ -4271,8 +4377,7 @@ impl Reedline {
         self.update_buffer_from_history();
         self.editor.move_to_end(false);
         self.editor.commit_cursor();
-        self.editor
-            .update_undo_state(UndoBehavior::HistoryNavigation);
+        self.editor.settle_history_landing();
         Ok(())
     }
 
@@ -4281,20 +4386,28 @@ impl Reedline {
     fn start_history_traversal(&mut self) {
         if self.input_mode != InputMode::HistoryTraversal {
             self.input_mode = InputMode::HistoryTraversal;
-            self.history_cursor = HistoryCursor::new(
-                self.get_history_navigation_based_on_line_buffer(),
-                self.get_history_session_id(),
-            );
+            if !self.history_cursor_stands_on_buffer_entry()
+                && !self.history_cursor_stands_on_displayed_entry()
+            {
+                self.history_cursor = HistoryCursor::new(
+                    self.get_history_navigation_based_on_line_buffer(),
+                    self.get_history_session_id(),
+                );
+            }
         }
     }
 
     fn next_history(&mut self) -> io::Result<()> {
         if self.input_mode != InputMode::HistoryTraversal {
             self.input_mode = InputMode::HistoryTraversal;
-            self.history_cursor = HistoryCursor::new(
-                self.get_history_navigation_based_on_line_buffer(),
-                self.get_history_session_id(),
-            );
+            if !self.history_cursor_stands_on_buffer_entry()
+                && !self.history_cursor_stands_on_displayed_entry()
+            {
+                self.history_cursor = HistoryCursor::new(
+                    self.get_history_navigation_based_on_line_buffer(),
+                    self.get_history_session_id(),
+                );
+            }
         }
 
         if self.history_last_run.is_recalled() {
@@ -4319,8 +4432,7 @@ impl Reedline {
         self.editor.move_to_end(false);
         // See `previous_history`: settle the out-of-band cursor under the policy.
         self.editor.commit_cursor();
-        self.editor
-            .update_undo_state(UndoBehavior::HistoryNavigation);
+        self.editor.settle_history_landing();
         Ok(())
     }
 
@@ -4354,6 +4466,96 @@ impl Reedline {
             self.get_history_session_id(),
         );
         self.input_mode = InputMode::HistorySearch;
+    }
+
+    /// GNU `_rl_isearch_fini` (isearch.c:269-302), shared by every
+    /// way out of an incremental search that *keeps* the found line
+    /// (accept, an `isearch-terminators` key, a base-keymap command
+    /// about to execute): the found line goes into the editor buffer
+    /// with point at `cxt->sline_index` — the start of the matched
+    /// substring (the last occurrence: reverse search scans a fresh
+    /// line from its right edge, isearch.c:854) — and the history
+    /// position moves onto the found entry (isearch.c:288-291), so
+    /// `OperateAndGetNext`/`YankLastArg` read it from
+    /// `history_recall_pos` and plain Up/Down traversal steps to the
+    /// entry's neighbours. No-op when the search never landed on an
+    /// entry (buffer and cursor then keep the pre-search state,
+    /// which is also GNU's no-match fini outcome).
+    fn finalize_history_search(&mut self) {
+        let Some(string) = self.history_cursor.string_at_cursor() else {
+            return;
+        };
+        let point = match self.history_cursor.get_navigation() {
+            HistoryNavigationQuery::SubstringSearch(needle) if !needle.is_empty() => {
+                string.rfind(&needle).unwrap_or(string.len())
+            }
+            _ => string.len(),
+        };
+        self.editor
+            .set_buffer(string, UndoBehavior::CreateUndoPoint);
+        let point = point.min(self.editor.get_buffer().len());
+        self.editor.edit_buffer(
+            |buf| buf.set_insertion_point(point),
+            UndoBehavior::MoveCursor,
+        );
+        self.editor.commit_cursor();
+        // Accepting an isearch match leaves the history position
+        // on the found entry (GNU's isearch lands `where_history`
+        // there too), which `OperateAndGetNext`/`YankLastArg` read.
+        self.history_recall_pos = self.history_cursor.id_at_cursor();
+        // Reseed the cursor as a traversal cursor standing on the
+        // found entry: `previous_history`/`next_history` keep a
+        // cursor that already stands on the buffer's entry instead
+        // of restarting the walk at the newest entry.
+        if let Some(item) = self.history_cursor.current_item().cloned() {
+            self.history_position = Self::history_position_of(&item);
+            let mut cursor = HistoryCursor::new(
+                HistoryNavigationQuery::Normal(self.editor.line_buffer().clone()),
+                self.get_history_session_id(),
+            );
+            cursor.set_current(item);
+            self.history_cursor = cursor;
+        }
+    }
+
+    /// Whether the history cursor already stands on the very entry
+    /// the editor buffer shows — the state
+    /// [`Reedline::finalize_history_search`] leaves behind. A fresh
+    /// Up/Down traversal must continue from that entry (GNU's fini
+    /// moved the history position there) rather than rebuild the
+    /// cursor from the buffer and restart at the newest entry.
+    fn history_cursor_stands_on_buffer_entry(&self) -> bool {
+        matches!(
+            self.history_cursor.get_navigation(),
+            HistoryNavigationQuery::Normal(_)
+        ) && self
+            .history_cursor
+            .string_at_cursor()
+            .is_some_and(|line| line == self.editor.get_buffer())
+    }
+
+    /// Whether the history cursor already stands on the entry the
+    /// buffer is showing per `history_position`, regardless of the
+    /// buffer text — the state an edit on a recalled entry leaves
+    /// behind (issue #57): the text moved on from the stored entry,
+    /// but the walk must continue from that entry, not restart from
+    /// a query rebuilt out of the edited text (which would strand
+    /// the walk: the edited text is no entry's prefix, and the
+    /// entry's saved undo stack would never be reached).
+    fn history_cursor_stands_on_displayed_entry(&self) -> bool {
+        if !matches!(
+            self.history_cursor.get_navigation(),
+            HistoryNavigationQuery::Normal(_)
+        ) {
+            return false;
+        }
+        match (&self.history_position, self.history_cursor.current_item()) {
+            (HistoryPosition::Entry(id), Some(item)) => item.id == Some(*id),
+            (HistoryPosition::UnsavedEntry(text), Some(item)) => {
+                item.id.is_none() && item.command_line == *text
+            }
+            _ => false,
+        }
     }
 
     /// The command line of the history entry `skip` entries before the
@@ -4501,6 +4703,7 @@ impl Reedline {
             .and_then(|mut results| results.pop());
         if let Some(item) = next {
             self.history_recall_pos = item.id;
+            self.history_position = Self::history_position_of(&item);
             self.editor
                 .set_buffer(item.command_line.clone(), UndoBehavior::CreateUndoPoint);
             self.history_cursor = HistoryCursor::new(
@@ -4564,6 +4767,9 @@ impl Reedline {
 
         if let Some(found) = self.history_cursor.string_at_cursor() {
             self.history_recall_pos = self.history_cursor.id_at_cursor();
+            if let Some(item) = self.history_cursor.current_item() {
+                self.history_position = Self::history_position_of(item);
+            }
             // GNU's point placement (search.c:635-644): anchored lands
             // on `_rl_history_search_len`; substring lands on the match
             // offset `newcol` (GNU also sets `rl_mark` to the line end,
@@ -4605,6 +4811,30 @@ impl Reedline {
         }
     }
 
+    /// Retarget the incremental search at a new needle: rebuild the
+    /// cursor on the needle and step to its newest match. When the
+    /// needle matches nothing, GNU does not drop the display to an
+    /// empty line — the failed search returns the position to
+    /// `last_found_line` and keeps showing that line under a failed
+    /// prompt (isearch.c:863-870) — so the previous match is carried
+    /// over as the cursor's entry while the (failed) needle stays
+    /// the query.
+    fn retarget_isearch_needle(&mut self, needle: String) -> io::Result<()> {
+        let last_match = self.history_cursor.current_item().cloned();
+        let mut cursor = HistoryCursor::new(
+            HistoryNavigationQuery::SubstringSearch(needle),
+            self.get_history_session_id(),
+        );
+        cursor.back(self.history.as_mut())?;
+        if cursor.string_at_cursor().is_none() {
+            if let Some(item) = last_match {
+                cursor.set_current(item);
+            }
+        }
+        self.history_cursor = cursor;
+        Ok(())
+    }
+
     /// Dispatches the applicable [`EditCommand`] actions for editing the history search string.
     ///
     /// Only modifies internal state, does not perform regular output!
@@ -4615,43 +4845,74 @@ impl Reedline {
                     let navigation = self.history_cursor.get_navigation();
                     if let HistoryNavigationQuery::SubstringSearch(mut substring) = navigation {
                         substring.push(*c);
-                        self.history_cursor = HistoryCursor::new(
-                            HistoryNavigationQuery::SubstringSearch(substring),
-                            self.get_history_session_id(),
-                        );
+                        self.retarget_isearch_needle(substring)?;
                     } else {
-                        self.history_cursor = HistoryCursor::new(
-                            HistoryNavigationQuery::SubstringSearch(String::from(*c)),
-                            self.get_history_session_id(),
-                        );
+                        self.retarget_isearch_needle(String::from(*c))?;
                     }
-                    self.history_cursor.back(self.history.as_mut())?;
                 }
                 EditCommand::Backspace => {
                     let navigation = self.history_cursor.get_navigation();
 
                     if let HistoryNavigationQuery::SubstringSearch(substring) = navigation {
                         let new_substring = text_manipulation::remove_last_grapheme(&substring);
-
-                        self.history_cursor = HistoryCursor::new(
-                            HistoryNavigationQuery::SubstringSearch(new_substring.to_string()),
-                            self.get_history_session_id(),
-                        );
-                        self.history_cursor.back(self.history.as_mut())?
+                        self.retarget_isearch_needle(new_substring.to_string())?;
                     }
                 }
                 command => {
-                    // GNU leaves the search and re-executes the key
-                    // (isearch.c: a non-search command exits the search
-                    // mode and is then applied to the line). Discarding it
-                    // loses whole edits — a bracketed paste arrives as
-                    // `InsertString`, `Delete` arrives as itself.
+                    // GNU's isearch dispatch (isearch.c:513-524): a
+                    // base-keymap command that is not `rl_insert`
+                    // terminates the search and is then executed as
+                    // the pending command — on the *found* line, so
+                    // the search finalizes first (`_rl_isearch_fini`:
+                    // found line in the buffer, point at the match
+                    // start) and the command applies to it. Running
+                    // the command against the pre-search buffer
+                    // instead discards its effect, since the found
+                    // line is what the user sees. A bracketed paste
+                    // arrives as `InsertString`, `Delete` as itself.
+                    self.finalize_history_search();
                     self.input_mode = InputMode::Regular;
                     self.run_edit_commands(std::slice::from_ref(command));
                 }
             }
         }
         Ok(())
+    }
+
+    /// The [`HistoryPosition`] key for a history item the buffer is
+    /// landed on (issue #57).
+    fn history_position_of(item: &HistoryItem) -> HistoryPosition {
+        match item.id {
+            Some(id) => HistoryPosition::Entry(id),
+            None => HistoryPosition::UnsavedEntry(item.command_line.clone()),
+        }
+    }
+
+    /// Paint a history landing (issue #57): save the editor's undo
+    /// stack under the position being left — GNU stores the line's
+    /// text and `rl_undo_list` with the line on leaving it
+    /// (misc.c:335 `_rl_maybe_replace_line`) — then install the
+    /// stack saved for `landing` earlier in this traversal, if any;
+    /// otherwise run `paint_fresh`, the landing as it behaved
+    /// before saved stacks: a fresh undo floor at the landed text
+    /// (issue #53). "Landing" on the position the buffer already
+    /// shows is not a landing at all: buffer and stack stay exactly
+    /// as they are, edits included.
+    fn paint_history_landing(
+        &mut self,
+        landing: HistoryPosition,
+        paint_fresh: impl FnOnce(&mut Editor),
+    ) {
+        if self.history_position == landing {
+            return;
+        }
+        let leaving = std::mem::replace(&mut self.history_position, landing.clone());
+        self.history_saved_stacks
+            .insert(leaving, self.editor.edit_stack_snapshot());
+        match self.history_saved_stacks.remove(&landing) {
+            Some(saved) => self.editor.land_on_saved_stack(saved),
+            None => paint_fresh(&mut self.editor),
+        }
     }
 
     /// Set the buffer contents for history traversal/search in the standard prompt
@@ -4665,8 +4926,11 @@ impl Reedline {
         self.history_recall_pos = self.history_cursor.id_at_cursor();
         if self.history_last_run.is_recalled() {
             if let HistoryLastRun::Excluded { item, .. } = &self.history_last_run {
-                self.editor
-                    .set_buffer(item.command_line.clone(), UndoBehavior::HistoryNavigation);
+                let item = item.clone();
+                let landing = Self::history_position_of(&item);
+                self.paint_history_landing(landing, |editor| {
+                    editor.set_buffer(item.command_line.clone(), UndoBehavior::HistoryNavigation);
+                });
             }
             return;
         }
@@ -4674,19 +4938,34 @@ impl Reedline {
         match self.history_cursor.get_navigation() {
             HistoryNavigationQuery::Normal(original) => {
                 if let Some(buffer_to_paint) = self.history_cursor.string_at_cursor() {
-                    self.editor
-                        .set_buffer(buffer_to_paint, UndoBehavior::HistoryNavigation);
+                    let landing = self
+                        .history_cursor
+                        .current_item()
+                        .map(Self::history_position_of)
+                        .unwrap_or(HistoryPosition::LiveLine);
+                    self.paint_history_landing(landing, |editor| {
+                        editor.set_buffer(buffer_to_paint, UndoBehavior::HistoryNavigation);
+                    });
                 } else {
-                    // Hack
-                    self.editor
-                        .set_line_buffer(original, UndoBehavior::HistoryNavigation);
+                    // The live line: reinstall its saved stack if
+                    // traversal saved one, else the query's original
+                    // buffer (the pre-traversal line) as before.
+                    self.paint_history_landing(HistoryPosition::LiveLine, |editor| {
+                        editor.set_line_buffer(original, UndoBehavior::HistoryNavigation);
+                    });
                 }
             }
             HistoryNavigationQuery::PrefixSearch(prefix)
             | HistoryNavigationQuery::SubstringSearch(prefix) => {
                 let buffer = self.history_cursor.string_at_cursor().unwrap_or(prefix);
-                self.editor
-                    .set_buffer(buffer, UndoBehavior::HistoryNavigation);
+                let landing = self
+                    .history_cursor
+                    .current_item()
+                    .map(Self::history_position_of)
+                    .unwrap_or(HistoryPosition::LiveLine);
+                self.paint_history_landing(landing, |editor| {
+                    editor.set_buffer(buffer, UndoBehavior::HistoryNavigation);
+                });
             }
         }
     }
@@ -5263,12 +5542,22 @@ impl Reedline {
         let navigation = self.history_cursor.get_navigation();
 
         if let HistoryNavigationQuery::SubstringSearch(substring) = navigation {
-            let status =
-                if !substring.is_empty() && self.history_cursor.string_at_cursor().is_none() {
-                    PromptHistorySearchStatus::Failing
-                } else {
-                    PromptHistorySearchStatus::Passing
-                };
+            // The search is failing when the needle matches nothing —
+            // including when the display keeps the last match after a
+            // failed needle extension (GNU keeps the line and flags
+            // the prompt failed, isearch.c:863-870), so the test is
+            // "the shown line contains the needle", not "a line is
+            // shown at all".
+            let status = if !substring.is_empty()
+                && !self
+                    .history_cursor
+                    .string_at_cursor()
+                    .is_some_and(|line| line.contains(substring.as_str()))
+            {
+                PromptHistorySearchStatus::Failing
+            } else {
+                PromptHistorySearchStatus::Passing
+            };
 
             // The prompt passes through raw, but the search term is typed or
             // pasted, not the host's.
@@ -6669,8 +6958,11 @@ mod tests {
         let mut rl = auto_pair_engine(&[('(', ')')]);
         rl.enter_history_search();
 
-        rl.handle_history_search_event(ReedlineEvent::Edit(vec![EditCommand::InsertChar('(')]))
-            .expect("history search event handled");
+        rl.handle_history_search_event(
+            &DefaultPrompt::default(),
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar('(')]),
+        )
+        .expect("history search event handled");
 
         assert_eq!(rl.input_mode, InputMode::HistorySearch);
         assert_eq!(rl.editor.get_buffer(), "");
@@ -13313,7 +13605,7 @@ mod tests {
         assert_eq!(rl.input_mode, InputMode::HistorySearch);
 
         let status = rl
-            .handle_history_search_event(ReedlineEvent::ReReadInitFile)
+            .handle_history_search_event(&DefaultPrompt::default(), ReedlineEvent::ReReadInitFile)
             .unwrap();
         assert!(matches!(status, EventStatus::Handled));
         assert_eq!(rl.input_mode, InputMode::Regular);
