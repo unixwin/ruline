@@ -34,3 +34,5 @@ tio = "tio"
 alph = "alph"
 # for the symbol-name substring match in abi-coverage.py
 complet = "complet"
+# for the tokenization fragment of the Windows API type name INPUT_RECORDs in comments
+recor = "recor"
