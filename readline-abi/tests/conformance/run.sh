@@ -13,6 +13,11 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/ruline-conformance.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 mkdir -p "$tmp/home"
+# Pin the Rust toolchain homes before HOME is redirected: the rustup
+# shims resolve RUSTUP_HOME/CARGO_HOME from $HOME by default, so the
+# isolated HOME below would leave cargo unable to find its toolchain.
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export HOME="$tmp/home"
 export TMPDIR="$tmp"
 export LC_ALL=C
