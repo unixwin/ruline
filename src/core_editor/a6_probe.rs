@@ -189,7 +189,11 @@ fn c4_yank_pop_rotation_wraps() {
     run(&mut e, &[EditCommand::YankPop]);
     assert_eq!(state(&e).0, "three");
     run(&mut e, &[EditCommand::YankPop]);
-    assert_eq!(state(&e).0, "one ", "rotation must wrap to the newest entry");
+    assert_eq!(
+        state(&e).0,
+        "one ",
+        "rotation must wrap to the newest entry"
+    );
 }
 
 #[test]
@@ -307,10 +311,30 @@ fn e3_transpose_drags_char_forward() {
 #[test]
 fn a6_f04_command_sweep_never_panics_and_keeps_boundary() {
     let buffers = [
-        "", "a", "ab", "a b", "e\u{301}x", "a\u{301}", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466} fam",
-        "你好世界 abc", "a\tb", "foo.bar baz", "trailing  ", "  leading",
-        "one\ntwo three", "ß ß", "ﬀx", "\u{1F1FA}\u{1F1F8} flag x",
-        "कि hindi", "word", "a.b,c;d", "...", "   ", "\n", "x\n", "\u{0}nul",
+        "",
+        "a",
+        "ab",
+        "a b",
+        "e\u{301}x",
+        "a\u{301}",
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466} fam",
+        "你好世界 abc",
+        "a\tb",
+        "foo.bar baz",
+        "trailing  ",
+        "  leading",
+        "one\ntwo three",
+        "ß ß",
+        "ﬀx",
+        "\u{1F1FA}\u{1F1F8} flag x",
+        "कि hindi",
+        "word",
+        "a.b,c;d",
+        "...",
+        "   ",
+        "\n",
+        "x\n",
+        "\u{0}nul",
     ];
     let cmds: Vec<EditCommand> = vec![
         EditCommand::InsertChar('x'),
@@ -377,7 +401,10 @@ fn a6_f04_command_sweep_never_panics_and_keeps_boundary() {
                 (EditCommand::CutWordRight, EditCommand::YankPop),
                 (EditCommand::InsertChar('y'), EditCommand::Undo),
                 (EditCommand::SwapWords, EditCommand::SwapWords),
-                (EditCommand::MoveWordRightEnd { select: false }, EditCommand::CutChar),
+                (
+                    EditCommand::MoveWordRightEnd { select: false },
+                    EditCommand::CutChar,
+                ),
             ] {
                 let mut e = ed(buf, pos);
                 e.run_edit_command(&c1);
@@ -402,7 +429,11 @@ fn f2_vi_normal_sweep_never_panics() {
         EditCommand::UppercaseWord,
     ];
     for buf in buffers {
-        for pos in buf.char_indices().map(|(i, _)| i).chain(std::iter::once(buf.len())) {
+        for pos in buf
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(buf.len()))
+        {
             for cmd in &cmds {
                 let mut e = ed(buf, pos);
                 e.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
@@ -549,7 +580,11 @@ fn d6_insert_run_chunks_at_twenty() {
         e.run_edit_command(&EditCommand::InsertChar(c));
     }
     run(&mut e, &[EditCommand::Undo]);
-    assert_eq!(state(&e).0, "abcdefghijklmnopqrst", "newest 5-char chunk undone");
+    assert_eq!(
+        state(&e).0,
+        "abcdefghijklmnopqrst",
+        "newest 5-char chunk undone"
+    );
     run(&mut e, &[EditCommand::Undo]);
     assert_eq!(state(&e).0, "", "then the 20-char chunk");
 }

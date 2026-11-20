@@ -1,6 +1,6 @@
-mod base;
 #[cfg(test)]
 mod a6_probe;
+mod base;
 mod cursor;
 mod file_backed;
 mod item;

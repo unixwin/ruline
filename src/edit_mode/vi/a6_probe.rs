@@ -4,7 +4,7 @@
 use super::{Vi, ViMode};
 use crate::core_editor::Editor;
 use crate::prompt::PromptViMode;
-use crate::{EditCommand, EditMode, PromptEditMode, ReedlineEvent, ReedlineRawEvent, UndoBehavior};
+use crate::{EditMode, PromptEditMode, ReedlineEvent, ReedlineRawEvent, UndoBehavior};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 struct Driver {

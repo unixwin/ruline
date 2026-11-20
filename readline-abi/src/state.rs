@@ -98,12 +98,22 @@ extern "C" {
     // under these names; `stdin`/`stdout` there are macros over them, not
     // symbols. glibc and bionic export the plain names.
     #[cfg_attr(
-        any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"),
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos"
+        ),
         link_name = "__stdinp"
     )]
     static mut stdin: *mut libc::FILE;
     #[cfg_attr(
-        any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"),
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos"
+        ),
         link_name = "__stdoutp"
     )]
     static mut stdout: *mut libc::FILE;

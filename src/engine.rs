@@ -7034,11 +7034,7 @@ mod tests {
             let buffer = context.buffer();
             let point = context.insertion_point();
 
-            if open == close && Self::inside_unclosed_quote(buffer, point, open) {
-                return false;
-            }
-
-            true
+            !(open == close && Self::inside_unclosed_quote(buffer, point, open))
         }
     }
 
@@ -14415,7 +14411,7 @@ mod tests {
 #[cfg(test)]
 mod a6_probe {
     use super::*;
-    use crate::{DefaultPrompt, Emacs, Prompt, Vi};
+    use crate::{DefaultPrompt, Emacs, Vi};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn engine(edit_mode: Box<dyn EditMode>) -> Reedline {
@@ -14739,7 +14735,7 @@ mod a6_probe {
 #[cfg(test)]
 mod a6_probe_vi_eol {
     use super::*;
-    use crate::{DefaultPrompt, Prompt, Vi};
+    use crate::{DefaultPrompt, Vi};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn engine() -> Reedline {

@@ -4,9 +4,7 @@
 #![cfg(test)]
 
 use super::keybindings::Keybindings;
-use crate::{
-    default_emacs_keybindings, default_vi_insert_keybindings, EditCommand, ReedlineEvent,
-};
+use crate::{default_emacs_keybindings, default_vi_insert_keybindings, EditCommand, ReedlineEvent};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 fn edit_commands(ev: &ReedlineEvent) -> Vec<EditCommand> {
@@ -19,21 +17,29 @@ fn edit_commands(ev: &ReedlineEvent) -> Vec<EditCommand> {
 }
 
 fn bound(kb: &Keybindings, m: KeyModifiers, c: KeyCode) -> Vec<EditCommand> {
-    kb.find_binding(m, c).map(|ev| edit_commands(&ev)).unwrap_or_default()
+    kb.find_binding(m, c)
+        .map(|ev| edit_commands(&ev))
+        .unwrap_or_default()
 }
 
 #[test]
 fn g1_emacs_ctrl_w_is_a_kill() {
     let kb = default_emacs_keybindings();
     let cmds = bound(&kb, KeyModifiers::CONTROL, KeyCode::Char('w'));
-    assert!(!cmds.is_empty() && cmds.iter().all(|c| c.feeds_kill_ring()), "got {cmds:?}");
+    assert!(
+        !cmds.is_empty() && cmds.iter().all(|c| c.feeds_kill_ring()),
+        "got {cmds:?}"
+    );
 }
 
 #[test]
 fn g2_vi_insert_ctrl_w_is_a_kill() {
     let kb = default_vi_insert_keybindings();
     let cmds = bound(&kb, KeyModifiers::CONTROL, KeyCode::Char('w'));
-    assert!(!cmds.is_empty() && cmds.iter().all(|c| c.feeds_kill_ring()), "got {cmds:?}");
+    assert!(
+        !cmds.is_empty() && cmds.iter().all(|c| c.feeds_kill_ring()),
+        "got {cmds:?}"
+    );
 }
 
 #[test]
@@ -50,12 +56,15 @@ fn a6_f09_vi_insert_ctrl_u_is_a_kill() {
 fn g5_emacs_meta_backspace_is_a_kill() {
     let kb = default_emacs_keybindings();
     let cmds = bound(&kb, KeyModifiers::ALT, KeyCode::Backspace);
-    assert!(!cmds.is_empty() && cmds.iter().all(|c| c.feeds_kill_ring()), "got {cmds:?}");
+    assert!(
+        !cmds.is_empty() && cmds.iter().all(|c| c.feeds_kill_ring()),
+        "got {cmds:?}"
+    );
 }
 
 // ---------- C-x chord table (GNU emacs_ctlx_keymap) ---------------------------
 
-use crate::{Emacs, EditMode, ReedlineRawEvent};
+use crate::{EditMode, Emacs, ReedlineRawEvent};
 use crossterm::event::{Event, KeyEvent};
 
 fn emacs_key(em: &mut Emacs, code: KeyCode, mods: KeyModifiers) -> ReedlineEvent {
