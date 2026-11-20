@@ -28,3 +28,9 @@ caf = "caf"
 hel = "hel"
 # for word-cut tests deleting a char from "foo bar" / "foo.bar baz"
 fo = "fo"
+# for the termios parameter shorthand in readline-abi terminal code
+tio = "tio"
+# for reverse-search tests feeding the prefix of "alpha"
+alph = "alph"
+# for the symbol-name substring match in abi-coverage.py
+complet = "complet"
